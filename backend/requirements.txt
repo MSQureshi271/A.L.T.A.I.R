@@ -1,0 +1,13 @@
+google-genai>=0.8.0
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+python-multipart>=0.0.9
+httpx>=0.27.0
+# Milestone 3 — Google Workspace & Supabase
+google-api-python-client>=2.130.0
+google-auth-httplib2>=0.2.0
+google-auth-oauthlib>=1.2.0
+supabase>=2.0.0

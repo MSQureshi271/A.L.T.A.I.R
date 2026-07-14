@@ -1,0 +1,14 @@
+# Python virtual env (uv)
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Environment secrets — never commit this!
+.env
+
+# Uvicorn logs
+*.log
+
+# Dev OAuth token cache — never commit this!
+.token_cache.json
