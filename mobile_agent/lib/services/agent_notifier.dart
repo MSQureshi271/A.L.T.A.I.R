@@ -115,6 +115,7 @@ class AgentNotifier extends Notifier<AgentState> {
     try {
       final result = await _apiService.processVoiceCommand(
         transcript: transcript,
+        history: state.conversationHistory,
         onLogUpdate: (logText) {
           state = state.copyWith(activeLog: logText);
         },
@@ -143,7 +144,10 @@ class AgentNotifier extends Notifier<AgentState> {
         activeLog: isActionPending
             ? 'Awaiting approval for staged action.'
             : (result.textResponse != null ? 'Response received.' : 'Done.'),
+        // Persist the updated conversation history for the next turn
+        conversationHistory: result.updatedHistory ?? state.conversationHistory,
       );
+
     } catch (e) {
       state = state.copyWith(
         status: AgentStatus.idle,

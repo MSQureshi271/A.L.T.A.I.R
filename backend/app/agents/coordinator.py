@@ -69,15 +69,22 @@ def _build_client() -> genai.Client:
 
 def run_agent(
     user_text: str,
+    history: list[dict] | None = None,
 ) -> Generator[dict, None, None]:
     """Run the agentic loop from a plain-text command.
 
+    Args:
+        user_text: The user's transcribed voice command.
+        history:   Prior conversation turns as [{"role": "user"|"model", "text": str}].
+                   Limited to the last 20 entries (10 back-and-forth turns).
+
     Yields dicts with the following shapes:
 
-        {"type": "log",    "message": str}
-        {"type": "result", "text": str}
+        {"type": "log",            "message": str}
+        {"type": "result",         "text": str}
+        {"type": "history_update", "history": list[dict]}
         {"type": "approval_required", "action": str, "data": dict}
-        {"type": "error",  "message": str}
+        {"type": "error",          "message": str}
     """
     try:
         client = _build_client()
@@ -87,14 +94,27 @@ def run_agent(
 
     yield {"type": "log", "message": "🧠 Coordinator → parsing your command…"}
 
-    contents: list[types.Content] = [
-        types.Content(
-            role="user",
-            parts=[types.Part(text=user_text)],
-        )
-    ]
+    # Re-hydrate prior turns, capped at 20 entries (10 pairs)
+    prior = (history or [])[-20:]
+    contents: list[types.Content] = _history_to_contents(prior)
+    contents.append(
+        types.Content(role="user", parts=[types.Part(text=user_text)])
+    )
 
-    yield from _run_loop(client, contents)
+    yield from _run_loop(client, contents, history=prior, user_text=user_text)
+
+
+def _history_to_contents(history: list[dict]) -> list[types.Content]:
+    """Convert serialised history dicts back into Gemini Content objects."""
+    result: list[types.Content] = []
+    for turn in history:
+        role = turn.get("role", "user")
+        text = turn.get("text", "")
+        if text:
+            result.append(
+                types.Content(role=role, parts=[types.Part(text=text)])
+            )
+    return result
 
 
 def run_agent_audio(
@@ -144,6 +164,8 @@ def run_agent_audio(
 def _run_loop(
     client: genai.Client,
     contents: list[types.Content],
+    history: list[dict] | None = None,
+    user_text: str = "",
 ) -> Generator[dict, None, None]:
     """Shared Gemini tool-calling loop used by both text and audio entry points."""
     config = types.GenerateContentConfig(
@@ -168,10 +190,17 @@ def _run_loop(
             config=config,
         )
 
+        # ── Collect response parts ──────────────────────────────────────
         candidate = response.candidates[0]
-        finish_reason = candidate.finish_reason
 
-        # Collect all parts from this response turn
+        # Guard against None content (safety filters, quota errors, etc.)
+        if not candidate.content or not candidate.content.parts:
+            yield {
+                "type": "error",
+                "message": f"Gemini returned no content. Finish reason: {candidate.finish_reason}",
+            }
+            return
+
         response_parts: list[types.Part] = list(candidate.content.parts)
 
         # Check whether Gemini returned function calls
@@ -188,6 +217,16 @@ def _run_loop(
             ).strip()
             yield {"type": "log", "message": "✅ Final answer ready."}
             yield {"type": "result", "text": final_text}
+
+            # Emit updated history so Flutter can persist it
+            updated_history = list(history or [])
+            if user_text:
+                updated_history.append({"role": "user", "text": user_text})
+            if final_text:
+                updated_history.append({"role": "model", "text": final_text})
+            # Keep only the last 20 entries
+            updated_history = updated_history[-20:]
+            yield {"type": "history_update", "history": updated_history}
             return
 
         # ── Execute each function call ────────────────────────────────────

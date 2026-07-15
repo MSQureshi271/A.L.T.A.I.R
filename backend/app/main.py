@@ -59,6 +59,10 @@ app.include_router(auth_router, prefix="/auth")
 
 class TextCommandRequest(BaseModel):
     text: str = Field(..., min_length=1, description="The transcribed voice command.")
+    history: list[dict] = Field(
+        default_factory=list,
+        description="Prior conversation turns [{role, text}]. Max 20 entries."
+    )
 
 
 class ExecuteActionRequest(BaseModel):
@@ -92,7 +96,7 @@ async def agent_text(
     """
     def event_stream():
         try:
-            for event in run_agent(body.text):
+            for event in run_agent(body.text, history=body.history):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except Exception as exc:  # noqa: BLE001
             logger.exception("Unhandled error in agent loop")

@@ -20,8 +20,9 @@ String get _backendBaseUrl {
 class ProcessCommandResult {
   final PendingAction? pendingAction;
   final String? textResponse;
+  final List<Map<String, dynamic>>? updatedHistory;
 
-  ProcessCommandResult({this.pendingAction, this.textResponse});
+  ProcessCommandResult({this.pendingAction, this.textResponse, this.updatedHistory});
 }
 
 class ApiService {
@@ -32,10 +33,12 @@ class ApiService {
   /// Takes the STT-transcribed [transcript] from SpeechService and streams
   /// it through the Gemini agent loop via POST /agent/text.
   ///
+  /// [history] is the serialised prior conversation (up to 20 entries).
   /// Falls back to the built-in mock when the backend is unreachable.
   Future<ProcessCommandResult> processVoiceCommand({
     required String transcript,
     required Function(String logText) onLogUpdate,
+    List<Map<String, dynamic>> history = const [],
   }) async {
     onLogUpdate('📤 Sending transcript to backend agents…');
 
@@ -43,6 +46,7 @@ class ApiService {
       return await _streamAgentText(
         text: transcript,
         onLogUpdate: onLogUpdate,
+        history: history,
       );
     } catch (e) {
       // Backend unreachable — fall back to local mock so the UI still works
@@ -56,13 +60,14 @@ class ApiService {
   Future<ProcessCommandResult> _streamAgentText({
     required String text,
     required Function(String) onLogUpdate,
+    List<Map<String, dynamic>> history = const [],
   }) async {
     final uri = Uri.parse('$_backendBaseUrl/agent/text');
 
     final request = http.Request('POST', uri)
       ..headers['Content-Type'] = 'application/json'
       ..headers['Accept'] = 'text/event-stream'
-      ..body = jsonEncode({'text': text});
+      ..body = jsonEncode({'text': text, 'history': history});
 
     final http.StreamedResponse streamed =
         await http.Client().send(request).timeout(
@@ -76,6 +81,7 @@ class ApiService {
 
     PendingAction? pendingAction;
     String? textResponse;
+    List<Map<String, dynamic>>? updatedHistory;
 
     await for (final chunk
         in streamed.stream.transform(utf8.decoder).transform(const LineSplitter())) {
@@ -95,6 +101,12 @@ class ApiService {
         case 'result':
           textResponse = event['text'] as String?;
           onLogUpdate('✅ ${textResponse ?? 'Done.'}');
+          break;
+
+        case 'history_update':
+          updatedHistory = (event['history'] as List<dynamic>?)
+              ?.map((e) => Map<String, dynamic>.from(e as Map))
+              .toList();
           break;
 
         case 'approval_required':
@@ -117,6 +129,7 @@ class ApiService {
     return ProcessCommandResult(
       pendingAction: pendingAction,
       textResponse: textResponse,
+      updatedHistory: updatedHistory,
     );
   }
 

@@ -62,6 +62,7 @@ class AgentState {
   final String? currentTranscript;
   final String? activeLog;
   final PendingAction? pendingAction;
+  final List<Map<String, dynamic>> conversationHistory;
 
   const AgentState({
     this.status = AgentStatus.idle,
@@ -69,6 +70,7 @@ class AgentState {
     this.currentTranscript,
     this.activeLog,
     this.pendingAction,
+    this.conversationHistory = const [],
   });
 
   AgentState copyWith({
@@ -78,6 +80,7 @@ class AgentState {
     String? activeLog,
     PendingAction? pendingAction,
     bool clearPendingAction = false,
+    List<Map<String, dynamic>>? conversationHistory,
   }) {
     return AgentState(
       status: status ?? this.status,
@@ -85,6 +88,7 @@ class AgentState {
       currentTranscript: currentTranscript ?? this.currentTranscript,
       activeLog: activeLog ?? this.activeLog,
       pendingAction: clearPendingAction ? null : (pendingAction ?? this.pendingAction),
+      conversationHistory: conversationHistory ?? this.conversationHistory,
     );
   }
 }

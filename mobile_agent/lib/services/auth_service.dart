@@ -5,7 +5,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 /// Base URL for auth endpoints — mirrors the pattern used in api_service.dart.
 const String _kWebAuthBaseUrl = 'http://127.0.0.1:8000';
-const String _kAndroidAuthBaseUrl = 'http://10.0.2.2:8000';
+const String _kAndroidAuthBaseUrl = 'https://craftily-roast-angelfish.ngrok-free.dev';
 
 String get _authBaseUrl {
   if (kIsWeb) return _kWebAuthBaseUrl;
@@ -56,6 +56,7 @@ class AuthService {
         return GoogleAuthStatus(
           connected: body['connected'] as bool? ?? false,
           scopes: List<String>.from(body['scopes'] as List? ?? []),
+          email: body['email'] as String? ?? '',
         );
       }
       return const GoogleAuthStatus(connected: false);
@@ -84,11 +85,13 @@ class AuthService {
 class GoogleAuthStatus {
   final bool connected;
   final List<String> scopes;
+  final String email;
   final bool error; // True when the status check itself failed (backend down, etc.)
 
   const GoogleAuthStatus({
     required this.connected,
     this.scopes = const [],
+    this.email = '',
     this.error = false,
   });
 }

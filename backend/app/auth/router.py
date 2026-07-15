@@ -135,6 +135,7 @@ async def google_status() -> dict:
         "connected": connected,
         "provider": "google",
         "scopes": scopes,
+        "email": token_data.get("email", "") if token_data else "",
     }
 
 

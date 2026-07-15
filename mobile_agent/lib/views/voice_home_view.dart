@@ -6,7 +6,7 @@ import '../services/agent_notifier.dart';
 import '../widgets/voice_visualizer.dart';
 import '../widgets/agent_status_card.dart';
 import '../widgets/approval_drawer.dart';
-import 'settings_view.dart';
+import '../widgets/app_drawer.dart';
 
 class VoiceHomeView extends ConsumerStatefulWidget {
   const VoiceHomeView({super.key});
@@ -17,6 +17,7 @@ class VoiceHomeView extends ConsumerStatefulWidget {
 
 class _VoiceHomeViewState extends ConsumerState<VoiceHomeView> {
   final ScrollController _scrollController = ScrollController();
+  final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
 
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -71,10 +72,16 @@ class _VoiceHomeViewState extends ConsumerState<VoiceHomeView> {
     });
 
     return Scaffold(
+      key: _scaffoldKey,
       backgroundColor: const Color(0xFF0F0F12),
+      drawer: const AppDrawer(),
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
+        leading: IconButton(
+          onPressed: () => _scaffoldKey.currentState!.openDrawer(),
+          icon: const Icon(Icons.menu_rounded, color: Colors.white70),
+        ),
         title: Row(
           children: [
             Container(
@@ -115,18 +122,6 @@ class _VoiceHomeViewState extends ConsumerState<VoiceHomeView> {
             ),
           ],
         ),
-        actions: [
-          IconButton(
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const SettingsView()),
-              );
-            },
-            icon: const Icon(Icons.tune_rounded, color: Colors.white70),
-          ),
-          const SizedBox(width: 8),
-        ],
       ),
       body: SafeArea(
         child: Column(
