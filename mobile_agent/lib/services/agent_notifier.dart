@@ -52,19 +52,14 @@ class AgentNotifier extends Notifier<AgentState> {
 
     await _speechService.startListening(
       onResult: (transcript, isFinal) {
-        // Stream partial results live into currentTranscript
+        // Stream local background STT preview words live into transcript bar
         state = state.copyWith(currentTranscript: transcript);
-        if (isFinal && transcript.trim().isNotEmpty) {
-          _processTranscript(transcript);
-        }
       },
       onDone: () {
-        // Fires when the STT engine stops (silence timeout or manual stop).
-        // Only act if onResult never produced a final result.
         if (!_processingStarted) {
-          final partial = state.currentTranscript ?? '';
-          if (partial.trim().isNotEmpty) {
-            _processTranscript(partial);
+          final audioPath = _speechService.latestAudioPath;
+          if (audioPath != null) {
+            _processAudioFile(audioPath);
           } else {
             state = state.copyWith(
               status: AgentStatus.idle,
@@ -78,52 +73,45 @@ class AgentNotifier extends Notifier<AgentState> {
 
   Future<void> stopListening() async {
     if (state.status != AgentStatus.listening) return;
-    // Manually stop — onDone/onResult will fire and trigger _processTranscript
     await _speechService.stopListening();
   }
 
   // ── Core processing ──────────────────────────────────────────────────────
 
-  /// Sends the finalised [transcript] to the backend agent loop.
-  Future<void> _processTranscript(String transcript) async {
-    // One-shot guard: prevent double-invocation from onResult+onDone race
+  /// Uploads high-quality recorded audio file to backend for transcription and task run.
+  Future<void> _processAudioFile(String audioPath) async {
     if (_processingStarted) return;
     _processingStarted = true;
 
-    if (transcript.trim().isEmpty) {
-      state = state.copyWith(
-        status: AgentStatus.idle,
-        activeLog: 'Empty transcript — nothing to send.',
-      );
-      return;
-    }
-
     state = state.copyWith(
       status: AgentStatus.processing,
-      activeLog: 'Sending to agents…',
+      activeLog: 'Uploading audio command…',
+      clearPlan: true,
     );
-
-    // Show what the user said as a chat bubble immediately
-    final userMessage = ChatMessage(
-      id: _uuid.v4(),
-      text: transcript,
-      timestamp: DateTime.now(),
-      sender: SenderType.user,
-    );
-    state = state.copyWith(messages: [...state.messages, userMessage]);
 
     try {
-      final result = await _apiService.processVoiceCommand(
-        transcript: transcript,
-        history: state.conversationHistory,
+      final result = await _apiService.processAudioCommand(
+        audioFilePath: audioPath,
+        onTranscriptReceived: (transcript) {
+          // Surfaced during Pass 1: add the user's bubble dynamically
+          final userMessage = ChatMessage(
+            id: _uuid.v4(),
+            text: transcript,
+            timestamp: DateTime.now(),
+            sender: SenderType.user,
+          );
+          state = state.copyWith(
+            messages: [...state.messages, userMessage],
+          );
+        },
         onLogUpdate: (logText) {
           state = state.copyWith(activeLog: logText);
         },
+        history: state.conversationHistory,
       );
 
       final newMessages = List<ChatMessage>.from(state.messages);
 
-      // If the agent returned a plain text response, add it to chat
       if (result.textResponse != null) {
         newMessages.add(
           ChatMessage(
@@ -144,19 +132,19 @@ class AgentNotifier extends Notifier<AgentState> {
         activeLog: isActionPending
             ? 'Awaiting approval for staged action.'
             : (result.textResponse != null ? 'Response received.' : 'Done.'),
-        // Persist the updated conversation history for the next turn
         conversationHistory: result.updatedHistory ?? state.conversationHistory,
+        currentPlan: result.plan,
       );
 
     } catch (e) {
       state = state.copyWith(
         status: AgentStatus.idle,
-        activeLog: 'Error processing: $e',
+        activeLog: 'Error processing voice command: $e',
         messages: [
           ...state.messages,
           ChatMessage(
             id: _uuid.v4(),
-            text: 'Failed to process command: $e',
+            text: 'Failed to complete voice command: $e',
             timestamp: DateTime.now(),
             sender: SenderType.system,
           ),
@@ -164,6 +152,9 @@ class AgentNotifier extends Notifier<AgentState> {
       );
     }
   }
+
+
+
 
   // ── Action approval ──────────────────────────────────────────────────────
 
@@ -174,6 +165,9 @@ class AgentNotifier extends Notifier<AgentState> {
         id: state.pendingAction!.id,
         actionType: state.pendingAction!.actionType,
         data: updatedData,
+        safetyWarning: state.pendingAction!.safetyWarning,
+        requiresDoubleConfirm: state.pendingAction!.requiresDoubleConfirm,
+        safetyLevel: state.pendingAction!.safetyLevel,
       ),
     );
   }

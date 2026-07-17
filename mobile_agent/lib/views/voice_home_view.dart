@@ -7,6 +7,7 @@ import '../widgets/voice_visualizer.dart';
 import '../widgets/agent_status_card.dart';
 import '../widgets/approval_drawer.dart';
 import '../widgets/app_drawer.dart';
+import '../widgets/plan_preview_card.dart';
 
 class VoiceHomeView extends ConsumerStatefulWidget {
   const VoiceHomeView({super.key});
@@ -131,20 +132,9 @@ class _VoiceHomeViewState extends ConsumerState<VoiceHomeView> {
 
             // Chat Feed
             Expanded(
-              child: state.messages.isEmpty && (state.activeLog == null || state.activeLog!.isEmpty)
+              child: state.messages.isEmpty && (state.activeLog == null || state.activeLog!.isEmpty) && state.currentPlan == null
                   ? _buildEmptyState()
-                  : ListView.builder(
-                      controller: _scrollController,
-                      padding: const EdgeInsets.only(bottom: 24, top: 12),
-                      itemCount: state.messages.length + (state.status == AgentStatus.processing ? 1 : 0),
-                      itemBuilder: (context, index) {
-                        if (index == state.messages.length) {
-                          // Processing item
-                          return _buildProcessingItem(state.activeLog ?? "Processing...");
-                        }
-                        return AgentStatusCard(message: state.messages[index]);
-                      },
-                    ),
+                  : _buildChatList(state),
             ),
 
             // Live Transcript box
@@ -337,6 +327,39 @@ class _VoiceHomeViewState extends ConsumerState<VoiceHomeView> {
         text,
         style: GoogleFonts.outfit(color: Colors.white60, fontSize: 11),
       ),
+    );
+  }
+
+  /// Builds the main chat feed, optionally injecting a [PlanPreviewCard] as a
+  /// virtual item after the last agent message and before any processing indicator.
+  Widget _buildChatList(AgentState state) {
+    final showPlan = state.currentPlan != null;
+    final showProcessing = state.status == AgentStatus.processing;
+
+    // Total virtual items = messages + optional plan card + optional processing
+    final int extraItems = (showPlan ? 1 : 0) + (showProcessing ? 1 : 0);
+    final int totalItems = state.messages.length + extraItems;
+
+    return ListView.builder(
+      controller: _scrollController,
+      padding: const EdgeInsets.only(bottom: 24, top: 12),
+      itemCount: totalItems,
+      itemBuilder: (context, index) {
+        // First section: chat messages
+        if (index < state.messages.length) {
+          return AgentStatusCard(message: state.messages[index]);
+        }
+
+        final extraIndex = index - state.messages.length;
+
+        // Second section: plan preview card (if available)
+        if (showPlan && extraIndex == 0) {
+          return PlanPreviewCard(plan: state.currentPlan!);
+        }
+
+        // Third section: processing indicator
+        return _buildProcessingItem(state.activeLog ?? 'Processing…');
+      },
     );
   }
 

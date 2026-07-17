@@ -1,6 +1,6 @@
 # A.L.T.A.I.R. — Engineering Roadmap
 
-> **A**utonomous **L**anguage-driven **T**ask **A**gent with **I**ntelligent **R**easoning
+> **A** **L**ittle **T**oo **A**dvanced **I** **R**eckon
 >
 > *A comprehensive development plan from our current Phase 1 baseline toward a fully autonomous, context-aware, multi-step planning assistant.*
 

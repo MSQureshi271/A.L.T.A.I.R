@@ -20,13 +20,17 @@ import logging
 from typing import Annotated
 
 import uvicorn
-from fastapi import FastAPI, Body, File, HTTPException, UploadFile
+from fastapi import FastAPI, Body, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from google import genai
+from google.genai import types
 
 from app.config import settings
 from app.agents.coordinator import run_agent, run_agent_audio
+from app.agents.planner import plan as planner_plan
+from app.agents.executor import execute_plan
 from app.auth.router import router as auth_router
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -96,10 +100,25 @@ async def agent_text(
     """
     def event_stream():
         try:
-            for event in run_agent(body.text, history=body.history):
+            # ── Step 1: Planner produces a structured task plan ──────────────
+            try:
+                task_plan = planner_plan(body.text, history=body.history)
+            except Exception as plan_exc:  # noqa: BLE001
+                logger.warning("Planner failed (%s) — falling back to coordinator", plan_exc)
+                # Fallback: run the old coordinator loop if the planner fails
+                for event in run_agent(body.text, history=body.history):
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                return
+
+            # Emit the plan so Flutter can show a preview card
+            yield f"data: {json.dumps({'type': 'plan', 'plan': task_plan.model_dump()}, ensure_ascii=False)}\n\n"
+
+            # ── Step 2: Executor processes the plan ───────────────────────────
+            for event in execute_plan(task_plan, user_text=body.text, history=body.history):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
         except Exception as exc:  # noqa: BLE001
-            logger.exception("Unhandled error in agent loop")
+            logger.exception("Unhandled error in agent pipeline")
             yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
         finally:
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
@@ -109,7 +128,7 @@ async def agent_text(
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",  # Disable Nginx buffering for SSE
+            "X-Accel-Buffering": "no",
         },
     )
 
@@ -117,20 +136,23 @@ async def agent_text(
 @app.post("/agent/voice", tags=["Agent"])
 async def agent_voice(
     file: Annotated[UploadFile, File(description="Recorded audio file from the device microphone.")],
+    history: Annotated[str, Form(description="Serialized JSON history list.")] = "[]",
 ) -> StreamingResponse:
     """
-    Accepts a raw audio file (m4a, wav, webm) and streams the agent's
-    execution log back as Server-Sent Events (SSE).
-
-    Gemini processes the audio natively — no separate STT service required.
-    SSE event shapes are identical to /agent/text.
+    Accepts a raw audio file (m4a, wav, webm) and a conversation history,
+    streams the transcribed user text first, then the task plan, and
+    finally the execution logs and results.
     """
     audio_bytes = await file.read()
     mime_type = file.content_type or "audio/m4a"
 
+    try:
+        history_list = json.loads(history)
+    except Exception:
+        history_list = []
+
     # Save a local copy of the received audio file for developer inspection
     try:
-        # Determine appropriate file extension from mime type
         ext = "wav" if "wav" in mime_type else "m4a"
         save_path = f"latest_received_command.{ext}"
         with open(save_path, "wb") as f:
@@ -141,10 +163,67 @@ async def agent_voice(
 
     def event_stream():
         try:
-            for event in run_agent_audio(audio_bytes, mime_type):
+            # ── Pass 1: Transcribe the audio via Gemini multimodal ─────────────
+            yield f"data: {json.dumps({'type': 'log', 'message': '🎙️  Processing audio transcription…'}, ensure_ascii=False)}\n\n"
+            
+            if not settings.GEMINI_API_KEY:
+                raise RuntimeError("GEMINI_API_KEY is not set.")
+                
+            client = genai.Client(api_key=settings.GEMINI_API_KEY)
+            
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[
+
+                    types.Content(
+                        role="user",
+                        parts=[
+                            types.Part(
+                                inline_data=types.Blob(
+                                    data=audio_bytes,
+                                    mime_type=mime_type,
+                                )
+                            ),
+                            types.Part(
+                                text=(
+                                    "Transcribe the user's voice command in the audio exactly. "
+                                    "Do not add any greeting, explanation, or commentary. "
+                                    "Output only the transcription."
+                                )
+                            ),
+                        ],
+                    )
+                ],
+            )
+            
+            transcript_text = response.text.strip() if response.text else ""
+            if not transcript_text:
+                yield f"data: {json.dumps({'type': 'error', 'message': 'Could not transcribe the audio.'}, ensure_ascii=False)}\n\n"
+                return
+
+            # Yield the final transcript text so Flutter can show it in a chat bubble
+            yield f"data: {json.dumps({'type': 'transcript', 'text': transcript_text}, ensure_ascii=False)}\n\n"
+
+            # ── Pass 2: Produce the structured plan ───────────────────────────
+            yield f"data: {json.dumps({'type': 'log', 'message': f'🧠 Planner → planning: \"{transcript_text}\"'}, ensure_ascii=False)}\n\n"
+            
+            try:
+                task_plan = planner_plan(transcript_text, history=history_list)
+            except Exception as plan_exc:
+                logger.warning("Planner failed (%s) — falling back to direct response", plan_exc)
+                # Fallback to direct agent run loop
+                for event in run_agent(transcript_text, history=history_list):
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                return
+
+            yield f"data: {json.dumps({'type': 'plan', 'plan': task_plan.model_dump()}, ensure_ascii=False)}\n\n"
+
+            # ── Pass 3: Execute the plan ──────────────────────────────────────
+            for event in execute_plan(task_plan, user_text=transcript_text, history=history_list):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Unhandled error in audio agent loop")
+
+        except Exception as exc:
+            logger.exception("Unhandled error in audio agent pipeline")
             yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
         finally:
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
@@ -191,6 +270,23 @@ async def execute_action(
             logger.exception("Gmail send failed")
             raise HTTPException(status_code=500, detail=f"Gmail send failed: {exc}") from exc
 
+    elif action == "delete_email":
+        from app.tools.email_tools import delete_email_via_gmail  # noqa: PLC0415
+        try:
+            message = delete_email_via_gmail(
+                email_id=data.get("email_id", ""),
+                sender=data.get("sender", ""),
+                subject=data.get("subject", ""),
+                user_id=user_id,
+                double_confirmed=data.get("double_confirmed", False),
+            )
+            return {"status": "success", "message": message}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Gmail delete failed")
+            raise HTTPException(status_code=500, detail=f"Gmail delete failed: {exc}") from exc
+
     elif action == "create_calendar_event":
         from app.tools.calendar_tools import create_google_calendar_event  # noqa: PLC0415
         try:
@@ -209,11 +305,163 @@ async def execute_action(
             logger.exception("Calendar event creation failed")
             raise HTTPException(status_code=500, detail=f"Calendar error: {exc}") from exc
 
+    elif action == "reschedule_calendar_event":
+        from app.tools.calendar_tools import reschedule_google_calendar_event  # noqa: PLC0415
+        try:
+            message = reschedule_google_calendar_event(
+                event_id=data.get("event_id", ""),
+                title=data.get("title", ""),
+                new_date=data.get("new_date", ""),
+                new_time=data.get("new_time", ""),
+                new_duration_minutes=int(data.get("new_duration_minutes", 60) or 60),
+                user_id=user_id,
+            )
+            return {"status": "success", "message": message}
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Calendar event reschedule failed")
+            raise HTTPException(status_code=500, detail=f"Calendar reschedule error: {exc}") from exc
+
+    elif action == "delete_calendar_event":
+        from app.tools.calendar_tools import delete_google_calendar_event  # noqa: PLC0415
+        try:
+            message = delete_google_calendar_event(
+                event_id=data.get("event_id", ""),
+                title=data.get("title", ""),
+                user_id=user_id,
+            )
+            return {"status": "success", "message": message}
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Calendar event deletion failed")
+            raise HTTPException(status_code=500, detail=f"Calendar deletion error: {exc}") from exc
+
+    elif action == "save_contact":
+        from app.agents.memory_manager import save_contact as mem_save_contact  # noqa: PLC0415
+        try:
+            mem_save_contact(
+                user_id=user_id,
+                name=data.get("name", ""),
+                email=data.get("email"),
+                phone=data.get("phone"),
+                company=data.get("company"),
+                notes=data.get("notes"),
+            )
+            return {"status": "success", "message": f"Remembered contact '{data.get('name')}'."}
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"Failed to save contact: {exc}") from exc
+
+    elif action == "save_preference":
+        from app.agents.memory_manager import save_preference as mem_save_pref  # noqa: PLC0415
+        try:
+            val = data.get("value")
+            try:
+                val = json.loads(val)
+            except Exception:  # noqa: BLE001
+                pass
+            mem_save_pref(
+                user_id=user_id,
+                category=data.get("category", ""),
+                key=data.get("key", ""),
+                value=val,
+            )
+            return {"status": "success", "message": f"Remembered preference '{data.get('category')}/{data.get('key')}'."}
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"Failed to save preference: {exc}") from exc
+
+    elif action == "save_routine":
+        from app.agents.memory_manager import save_routine as mem_save_routine  # noqa: PLC0415
+        try:
+            steps = [s.strip() for s in data.get("steps", "").split(",") if s.strip()]
+            mem_save_routine(
+                user_id=user_id,
+                name=data.get("name", ""),
+                steps=steps,
+            )
+            return {"status": "success", "message": f"Remembered routine '{data.get('name')}'."}
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"Failed to save routine: {exc}") from exc
+
+    elif action == "save_knowledge":
+        from app.agents.memory_manager import save_knowledge as mem_save_knowledge  # noqa: PLC0415
+        try:
+            mem_save_knowledge(
+                user_id=user_id,
+                text=data.get("text", ""),
+                importance=int(data.get("importance", 1)),
+            )
+            return {"status": "success", "message": "Fact stored in long-term memory."}
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"Failed to save fact: {exc}") from exc
+
+    elif action == "delete_memory":
+        try:
+            category = data.get("category", "")
+            key = data.get("key", "")
+            if category == "contacts":
+                from app.agents.memory_manager import delete_contact  # noqa: PLC0415
+                delete_contact(user_id, key)
+            elif category == "preferences":
+                parts = key.split("/")
+                if len(parts) == 2:
+                    from app.agents.memory_manager import delete_preference  # noqa: PLC0415
+                    delete_preference(user_id, parts[0], parts[1])
+            elif category == "routines":
+                from app.agents.memory_manager import delete_routine  # noqa: PLC0415
+                delete_routine(user_id, key)
+            elif category == "knowledge":
+                from app.agents.memory_manager import delete_knowledge  # noqa: PLC0415
+                delete_knowledge(user_id, key)
+            return {"status": "success", "message": f"Forgot '{key}'."}
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"Failed to forget: {exc}") from exc
+
     else:
         raise HTTPException(status_code=400, detail=f"Unknown action: {action}")
 
 
+@app.get("/agent/memory", tags=["Memory"])
+async def get_all_memory() -> dict:
+    """Retrieve all structured and unstructured memories for the user."""
+    from app.agents.memory_manager import (  # noqa: PLC0415
+        load_contacts,
+        load_preferences,
+        load_routines,
+        load_knowledge,
+    )
+    user_id = settings.DEV_USER_ID
+    return {
+        "contacts": load_contacts(user_id),
+        "preferences": load_preferences(user_id),
+        "routines": load_routines(user_id),
+        "knowledge": load_knowledge(user_id),
+    }
+
+
+@app.delete("/agent/memory", tags=["Memory"])
+async def delete_memory_entry(category: str, key: str) -> dict:
+    """Delete a memory record matching the category and key."""
+    user_id = settings.DEV_USER_ID
+    try:
+        if category == "contacts":
+            from app.agents.memory_manager import delete_contact  # noqa: PLC0415
+            delete_contact(user_id, key)
+        elif category == "preferences":
+            parts = key.split("/")
+            if len(parts) == 2:
+                from app.agents.memory_manager import delete_preference  # noqa: PLC0415
+                delete_preference(user_id, parts[0], parts[1])
+        elif category == "routines":
+            from app.agents.memory_manager import delete_routine  # noqa: PLC0415
+            delete_routine(user_id, key)
+        elif category == "knowledge":
+            from app.agents.memory_manager import delete_knowledge  # noqa: PLC0415
+            delete_knowledge(user_id, key)
+        return {"status": "success", "message": f"Successfully deleted memory: {key}"}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 # ── Dev entry point ───────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
     uvicorn.run(
         "app.main:app",

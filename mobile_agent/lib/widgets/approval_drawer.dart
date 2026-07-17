@@ -116,6 +116,86 @@ const List<ActionSchema> _kActionSchemas = [
     ],
   ),
 
+  ActionSchema(
+    actionType: 'delete_email',
+    displayName: 'Delete Email',
+    confirmLabel: 'Approve & Trash Email',
+    headerIcon: Icons.delete_outline_rounded,
+    accentColor: Color(0xFFE63946),
+    fields: [
+      ActionField(
+        key: 'email_id',
+        label: 'Email ID',
+        icon: Icons.key_rounded,
+      ),
+      ActionField(
+        key: 'sender',
+        label: 'Sender Filter',
+        icon: Icons.person_search_rounded,
+      ),
+      ActionField(
+        key: 'subject',
+        label: 'Subject Filter',
+        icon: Icons.title_rounded,
+      ),
+    ],
+  ),
+
+  ActionSchema(
+    actionType: 'reschedule_calendar_event',
+    displayName: 'Reschedule Event',
+    confirmLabel: 'Approve & Reschedule',
+    headerIcon: Icons.edit_calendar_rounded,
+    accentColor: Color(0xFFFFB703),
+    fields: [
+      ActionField(
+        key: 'event_id',
+        label: 'Event ID',
+        icon: Icons.key_rounded,
+      ),
+      ActionField(
+        key: 'title',
+        label: 'Event Title Lookup',
+        icon: Icons.search_rounded,
+      ),
+      ActionField(
+        key: 'new_date',
+        label: 'New Date (YYYY-MM-DD)',
+        icon: Icons.calendar_today_rounded,
+      ),
+      ActionField(
+        key: 'new_time',
+        label: 'New Start Time (HH:MM)',
+        icon: Icons.access_time_rounded,
+      ),
+      ActionField(
+        key: 'new_duration_minutes',
+        label: 'New Duration (minutes)',
+        icon: Icons.timelapse_rounded,
+      ),
+    ],
+  ),
+
+  ActionSchema(
+    actionType: 'delete_calendar_event',
+    displayName: 'Cancel Event',
+    confirmLabel: 'Approve & Delete Event',
+    headerIcon: Icons.calendar_today_rounded, // Wait, delete calendar icon
+    accentColor: Color(0xFFE63946),
+    fields: [
+      ActionField(
+        key: 'event_id',
+        label: 'Event ID',
+        icon: Icons.key_rounded,
+      ),
+      ActionField(
+        key: 'title',
+        label: 'Event Title Lookup',
+        icon: Icons.search_rounded,
+      ),
+    ],
+  ),
+
   // ── Future tool schemas go here ──────────────────────────────────────────
   // Example:
   // ActionSchema(
@@ -162,6 +242,7 @@ class ApprovalDrawer extends StatefulWidget {
 class _ApprovalDrawerState extends State<ApprovalDrawer> {
   late ActionSchema _schema;
   late Map<String, TextEditingController> _controllers;
+  bool _isEditing = false;
 
   @override
   void initState() {
@@ -252,7 +333,7 @@ class _ApprovalDrawerState extends State<ApprovalDrawer> {
                 const SizedBox(width: 10),
                 Expanded(
                   child: Text(
-                    'Review: ${_schema.displayName}',
+                    _isEditing ? 'Edit: ${_schema.displayName}' : 'Review: ${_schema.displayName}',
                     style: GoogleFonts.outfit(
                       color: const Color(0xFFF8F9FA),
                       fontSize: 18,
@@ -260,6 +341,23 @@ class _ApprovalDrawerState extends State<ApprovalDrawer> {
                     ),
                   ),
                 ),
+                // Edit/View toggle
+                if (_schema.fields.isNotEmpty) ...[
+                  IconButton(
+                    icon: Icon(
+                      _isEditing ? Icons.check_circle_outline_rounded : Icons.edit_rounded,
+                      color: _isEditing ? const Color(0xFF38B000) : _schema.accentColor,
+                      size: 22,
+                    ),
+                    onPressed: () {
+                      setState(() {
+                        _isEditing = !_isEditing;
+                      });
+                    },
+                    tooltip: _isEditing ? 'View Preview' : 'Edit Details',
+                  ),
+                  const SizedBox(width: 4),
+                ],
                 // Action type badge
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -282,13 +380,66 @@ class _ApprovalDrawerState extends State<ApprovalDrawer> {
             ),
             const SizedBox(height: 6),
             Text(
-              'Review and edit the details below before the agent executes this action.',
+              _isEditing
+                  ? 'Modify the details below and toggle back to preview, or approve when ready.'
+                  : 'Review the details below before the agent executes this action.',
               style: GoogleFonts.outfit(
                 color: const Color(0xFFADB5BD),
                 fontSize: 13,
               ),
             ),
             const SizedBox(height: 20),
+
+            // ── Safety Warning Banner ───────────────────────────────────────
+            if (widget.action.safetyWarning != null) ...[
+              Container(
+                margin: const EdgeInsets.only(bottom: 20),
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFE63946).withOpacity(0.12),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: const Color(0xFFE63946).withOpacity(0.3)),
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Icon(
+                      Icons.warning_amber_rounded,
+                      color: Color(0xFFE63946),
+                      size: 22,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            widget.action.safetyLevel == 'dangerous'
+                                ? '⚠️ DANGEROUS ACTION'
+                                : '⚠️ SAFETY WARNING',
+                            style: GoogleFonts.outfit(
+                              color: const Color(0xFFE63946),
+                              fontSize: 12,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 0.5,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            widget.action.safetyWarning!,
+                            style: GoogleFonts.outfit(
+                              color: const Color(0xFFF8F9FA),
+                              fontSize: 13,
+                              height: 1.3,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
 
             // ── Dynamic fields ──────────────────────────────────────────────
             if (_schema.fields.isEmpty)
@@ -297,7 +448,9 @@ class _ApprovalDrawerState extends State<ApprovalDrawer> {
             else
               for (int i = 0; i < _schema.fields.length; i++) ...[
                 if (i > 0) const SizedBox(height: 14),
-                _buildField(_schema.fields[i]),
+                _isEditing
+                    ? _buildField(_schema.fields[i])
+                    : _buildReadOnlyField(_schema.fields[i]),
               ],
 
             const SizedBox(height: 24),
@@ -323,37 +476,48 @@ class _ApprovalDrawerState extends State<ApprovalDrawer> {
                 ),
                 const SizedBox(width: 12),
                 Expanded(
-                  child: Container(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: [
-                          _schema.accentColor,
-                          _schema.accentColor.withOpacity(0.75),
-                        ],
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                      ),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: ElevatedButton(
-                      onPressed: () => widget.onConfirm(_buildUpdatedData()),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.transparent,
-                        shadowColor: Colors.transparent,
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12)),
-                      ),
-                      child: Text(
-                        _schema.confirmLabel,
-                        style: GoogleFonts.outfit(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 13,
+                  flex: widget.action.requiresDoubleConfirm ? 2 : 1,
+                  child: widget.action.requiresDoubleConfirm
+                      ? SlideToConfirm(
+                          accentColor: _schema.accentColor,
+                          label: 'Slide to Confirm',
+                          onConfirmed: () {
+                            final updated = _buildUpdatedData();
+                            updated['double_confirmed'] = true;
+                            widget.onConfirm(updated);
+                          },
+                        )
+                      : Container(
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              colors: [
+                                _schema.accentColor,
+                                _schema.accentColor.withOpacity(0.75),
+                              ],
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                            ),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: ElevatedButton(
+                            onPressed: () => widget.onConfirm(_buildUpdatedData()),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.transparent,
+                              shadowColor: Colors.transparent,
+                              padding: const EdgeInsets.symmetric(vertical: 14),
+                              shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12)),
+                            ),
+                            child: Text(
+                              _schema.confirmLabel,
+                              style: GoogleFonts.outfit(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13,
+                              ),
+                            ),
+                          ),
                         ),
-                      ),
-                    ),
-                  ),
                 ),
               ],
             ),
@@ -363,7 +527,7 @@ class _ApprovalDrawerState extends State<ApprovalDrawer> {
     );
   }
 
-  // ── Field builder ──────────────────────────────────────────────────────────
+  // ── Field builders ──────────────────────────────────────────────────────────
 
   Widget _buildField(ActionField field) {
     final controller = _controllers[field.key]!;
@@ -414,6 +578,53 @@ class _ApprovalDrawerState extends State<ApprovalDrawer> {
     );
   }
 
+  Widget _buildReadOnlyField(ActionField field) {
+    final value = _controllers[field.key]?.text ?? '';
+    final maxLines = field.type == FieldType.multiLine ? null : 1;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          field.label,
+          style: GoogleFonts.outfit(
+            color: const Color(0xFF6C757D),
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(height: 6),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          decoration: BoxDecoration(
+            color: const Color(0xFF0F0F12).withOpacity(0.4),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: Colors.white.withOpacity(0.02)),
+          ),
+          child: Row(
+            crossAxisAlignment: maxLines == 1 ? CrossAxisAlignment.center : CrossAxisAlignment.start,
+            children: [
+              Icon(field.icon, color: _schema.accentColor.withOpacity(0.6), size: 18),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  value.isNotEmpty ? value : '(empty)',
+                  style: GoogleFonts.outfit(
+                    color: value.isNotEmpty ? const Color(0xFFF8F9FA) : const Color(0xFF6C757D),
+                    fontSize: 14,
+                    height: 1.4,
+                  ),
+                  maxLines: maxLines,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
   // Fallback for completely unknown action types — shows raw key/value pairs
   Widget _buildRawDataView() {
     return Container(
@@ -453,6 +664,111 @@ class _ApprovalDrawerState extends State<ApprovalDrawer> {
           );
         }).toList(),
       ),
+    );
+  }
+}
+
+// ── Slide to Confirm Slider ──────────────────────────────────────────────────
+
+class SlideToConfirm extends StatefulWidget {
+  final VoidCallback onConfirmed;
+  final Color accentColor;
+  final String label;
+
+  const SlideToConfirm({
+    super.key,
+    required this.onConfirmed,
+    required this.accentColor,
+    required this.label,
+  });
+
+  @override
+  State<SlideToConfirm> createState() => _SlideToConfirmState();
+}
+
+class _SlideToConfirmState extends State<SlideToConfirm> {
+  double _position = 0.0;
+  bool _confirmed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final double maxDistance = constraints.maxWidth - 56.0; // handle diameter is 50 + margins
+        return Container(
+          height: 56,
+          decoration: BoxDecoration(
+            color: const Color(0xFF0F0F12),
+            borderRadius: BorderRadius.circular(28),
+            border: Border.all(color: widget.accentColor.withOpacity(0.35)),
+          ),
+          child: Stack(
+            children: [
+              // Track instructions text
+              Center(
+                child: Text(
+                  _confirmed ? 'CONFIRMED' : widget.label,
+                  style: GoogleFonts.outfit(
+                    color: _confirmed ? const Color(0xFF38B000) : Colors.white60,
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              // Swipe slider handle
+              Positioned(
+                left: _position + 3.0,
+                top: 3,
+                bottom: 3,
+                child: GestureDetector(
+                  onHorizontalDragUpdate: _confirmed
+                      ? null
+                      : (details) {
+                          setState(() {
+                            _position = (_position + details.delta.dx).clamp(0.0, maxDistance);
+                          });
+                        },
+                  onHorizontalDragEnd: _confirmed
+                      ? null
+                      : (details) {
+                          if (_position >= maxDistance - 10.0) {
+                            setState(() {
+                              _position = maxDistance;
+                              _confirmed = true;
+                            });
+                            widget.onConfirmed();
+                          } else {
+                            setState(() {
+                              _position = 0.0;
+                            });
+                          }
+                        },
+                  child: Container(
+                    width: 48,
+                    height: 48,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: widget.accentColor,
+                      boxShadow: [
+                        BoxShadow(
+                          color: widget.accentColor.withOpacity(0.4),
+                          blurRadius: 8,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    child: const Icon(
+                      Icons.arrow_forward_rounded,
+                      color: Colors.white,
+                      size: 22,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }

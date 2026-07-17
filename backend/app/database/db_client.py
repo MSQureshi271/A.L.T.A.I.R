@@ -134,3 +134,115 @@ def is_connected(user_id: str, provider: str) -> bool:
     """Return True if tokens exist for this user + provider."""
     tokens = load_tokens(user_id, provider)
     return tokens is not None and bool(tokens.get("refresh_token"))
+
+
+# ── Generic Memory Database Layer (Supabase + Local Cache Fallback) ──────────
+
+_MEM_CACHE_FILE = Path(__file__).parents[3] / ".memory_cache.json"
+
+
+def _read_mem_cache() -> dict:
+    if not _MEM_CACHE_FILE.exists():
+        return {}
+    try:
+        return json.loads(_MEM_CACHE_FILE.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _write_mem_cache(data: dict) -> None:
+    _MEM_CACHE_FILE.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def db_store_item(table: str, item: dict[str, Any], conflict_fields: list[str]) -> None:
+    """Store/upsert a record in Supabase or fall back to local JSON cache."""
+    sb = _get_supabase()
+    user_id = item.get("user_id", "DEV_USER_ID")
+
+    if sb:
+        try:
+            on_conflict = ",".join(conflict_fields)
+            sb.table(table).upsert(item, on_conflict=on_conflict).execute()
+            logger.info("Stored record in Supabase table=%s keys=%s", table, conflict_fields)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Supabase store failed for table=%s", table)
+            raise RuntimeError(f"Database error: {exc}") from exc
+    else:
+        cache = _read_mem_cache()
+        user_cache = cache.setdefault(user_id, {})
+        table_cache = user_cache.setdefault(table, [])
+
+        # Check for matching uniqueness to overwrite/update
+        updated = False
+        for i, existing in enumerate(table_cache):
+            # If all conflict fields match, replace it
+            match = True
+            for field in conflict_fields:
+                if existing.get(field) != item.get(field):
+                    match = False
+                    break
+            if match:
+                table_cache[i] = item
+                updated = True
+                break
+
+        if not updated:
+            table_cache.append(item)
+
+        _write_mem_cache(cache)
+        logger.info("Stored record in local memory cache table=%s", table)
+
+
+def db_load_items(table: str, user_id: str) -> list[dict[str, Any]]:
+    """Retrieve all records for a user in a given table."""
+    sb = _get_supabase()
+
+    if sb:
+        try:
+            result = sb.table(table).select("*").eq("user_id", user_id).execute()
+            return result.data or []
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Supabase load failed for table=%s", table)
+            return []
+    else:
+        cache = _read_mem_cache()
+        return cache.get(user_id, {}).get(table, [])
+
+
+def db_delete_item(table: str, user_id: str, criteria: dict[str, Any]) -> None:
+    """Delete matching records from Supabase or local cache."""
+    sb = _get_supabase()
+
+    if sb:
+        try:
+            q = sb.table(table).delete().eq("user_id", user_id)
+            for k, v in criteria.items():
+                q = q.eq(k, v)
+            q.execute()
+            logger.info("Deleted record in Supabase table=%s matching=%s", table, criteria)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Supabase delete failed for table=%s", table)
+            raise RuntimeError(f"Database error: {exc}") from exc
+    else:
+        cache = _read_mem_cache()
+        user_cache = cache.get(user_id, {})
+        table_cache = user_cache.get(table, [])
+
+        # Filter out items that match ALL deletion criteria
+        new_table_cache = []
+        for item in table_cache:
+            match = True
+            for k, v in criteria.items():
+                if item.get(k) != v:
+                    match = False
+                    break
+            if not match:
+                new_table_cache.append(item)
+
+        user_cache[table] = new_table_cache
+        _write_mem_cache(cache)
+        logger.info("Deleted record in local cache table=%s matching=%s", table, criteria)
+

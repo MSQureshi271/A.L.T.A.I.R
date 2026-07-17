@@ -48,11 +48,17 @@ class PendingAction {
   final String id;
   final String actionType; // 'send_email', 'create_event', etc.
   final Map<String, dynamic> data; // Detailed payload (to, subject, body, time, etc.)
+  final String? safetyWarning;
+  final bool requiresDoubleConfirm;
+  final String? safetyLevel; // 'safe' | 'caution' | 'dangerous'
 
   const PendingAction({
     required this.id,
     required this.actionType,
     required this.data,
+    this.safetyWarning,
+    this.requiresDoubleConfirm = false,
+    this.safetyLevel,
   });
 }
 
@@ -64,6 +70,10 @@ class AgentState {
   final PendingAction? pendingAction;
   final List<Map<String, dynamic>> conversationHistory;
 
+  /// The latest structured plan emitted by the Planner.
+  /// Null when no active plan exists (cleared after execution or cancellation).
+  final Map<String, dynamic>? currentPlan;
+
   const AgentState({
     this.status = AgentStatus.idle,
     this.messages = const [],
@@ -71,6 +81,7 @@ class AgentState {
     this.activeLog,
     this.pendingAction,
     this.conversationHistory = const [],
+    this.currentPlan,
   });
 
   AgentState copyWith({
@@ -81,6 +92,8 @@ class AgentState {
     PendingAction? pendingAction,
     bool clearPendingAction = false,
     List<Map<String, dynamic>>? conversationHistory,
+    Map<String, dynamic>? currentPlan,
+    bool clearPlan = false,
   }) {
     return AgentState(
       status: status ?? this.status,
@@ -89,6 +102,7 @@ class AgentState {
       activeLog: activeLog ?? this.activeLog,
       pendingAction: clearPendingAction ? null : (pendingAction ?? this.pendingAction),
       conversationHistory: conversationHistory ?? this.conversationHistory,
+      currentPlan: clearPlan ? null : (currentPlan ?? this.currentPlan),
     );
   }
 }
