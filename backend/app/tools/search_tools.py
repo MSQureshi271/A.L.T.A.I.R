@@ -1,13 +1,17 @@
 """
-app/tools/search_tools.py — Mock web-search tool exposed to Gemini.
+app/tools/search_tools.py — Google Search Grounding tool exposed to Gemini.
 
-In Milestone 3 this will be replaced with a real Google Search Grounding
-or Serper API call.  For now it returns plausible-looking mock data so we
-can validate the full function-calling loop end-to-end.
+Fetches live search results from Google Search using Gemini's native Search Grounding capability
+and returns a cited summary of the results.
 """
 from __future__ import annotations
 
-import datetime
+import logging
+from google import genai
+from google.genai import types
+from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 def search_web(query: str) -> str:
@@ -20,15 +24,24 @@ def search_web(query: str) -> str:
         query: The search query string.
 
     Returns:
-        A short plain-text summary of the top search results.
+        A short plain-text summary of the top search results including citations/sources.
     """
-    today = datetime.date.today().strftime("%B %d, %Y")
-    return (
-        f"[Mock Search — {today}]\n"
-        f"Search query: '{query}'\n"
-        "Results summary: Based on the latest available data, the information "
-        "you requested is trending positively. Key highlights include recent "
-        "developments that align with current market and industry standards. "
-        "(Real results will appear once the Google Search Grounding API is "
-        "connected in Milestone 3.)"
-    )
+    if not settings.GEMINI_API_KEY:
+        logger.error("GEMINI_API_KEY is not configured in settings.")
+        return "Search failed: Gemini API key is missing on the server."
+
+    logger.info("Executing Google Search Grounding for query: %r", query)
+    try:
+        client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=f"Search the web for: {query}. Summarize the key facts and list sources.",
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())],
+                temperature=0.0,
+            ),
+        )
+        return response.text or "No search results returned."
+    except Exception as exc:
+        logger.exception("Google Search Grounding failed")
+        return f"Web search error: {exc}"

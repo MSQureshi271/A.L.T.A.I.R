@@ -15,9 +15,12 @@ consume the live agent log as it runs.
 """
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
 import json
 import logging
 from typing import Annotated
+
 
 import uvicorn
 from fastapi import FastAPI, Body, File, Form, HTTPException, UploadFile
@@ -30,7 +33,9 @@ from google.genai import types
 from app.config import settings
 from app.agents.coordinator import run_agent, run_agent_audio
 from app.agents.planner import plan as planner_plan
-from app.agents.executor import execute_plan
+from app.agents.executor import execute_plan, save_active_plan, load_active_plan, load_active_plan_record
+from app.agents.planner_schema import TaskPlan, TaskStep
+
 from app.auth.router import router as auth_router
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -40,11 +45,26 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Start the watcher scheduler loop
+    import asyncio
+    from app.agents.watcher_scheduler import start_scheduler_loop  # noqa: PLC0415
+    task = asyncio.create_task(start_scheduler_loop())
+    yield
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
 # ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="Executive Agent API",
     description="Multi-agent productivity backend powered by Gemini 2.0 Flash.",
     version="0.2.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -98,7 +118,7 @@ async def agent_text(
         data: {"type": "error",            "message": "..."}
         data: {"type": "done"}
     """
-    def event_stream():
+    async def event_stream():
         try:
             # ── Step 1: Planner produces a structured task plan ──────────────
             try:
@@ -114,8 +134,9 @@ async def agent_text(
             yield f"data: {json.dumps({'type': 'plan', 'plan': task_plan.model_dump()}, ensure_ascii=False)}\n\n"
 
             # ── Step 2: Executor processes the plan ───────────────────────────
-            for event in execute_plan(task_plan, user_text=body.text, history=body.history):
+            async for event in execute_plan(task_plan, user_text=body.text, history=body.history):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
 
         except Exception as exc:  # noqa: BLE001
             logger.exception("Unhandled error in agent pipeline")
@@ -161,7 +182,7 @@ async def agent_voice(
     except Exception as exc:
         logger.error("Failed to save copy of received audio: %s", exc)
 
-    def event_stream():
+    async def event_stream():
         try:
             # ── Pass 1: Transcribe the audio via Gemini multimodal ─────────────
             yield f"data: {json.dumps({'type': 'log', 'message': '🎙️  Processing audio transcription…'}, ensure_ascii=False)}\n\n"
@@ -219,8 +240,9 @@ async def agent_voice(
             yield f"data: {json.dumps({'type': 'plan', 'plan': task_plan.model_dump()}, ensure_ascii=False)}\n\n"
 
             # ── Pass 3: Execute the plan ──────────────────────────────────────
-            for event in execute_plan(task_plan, user_text=transcript_text, history=history_list):
+            async for event in execute_plan(task_plan, user_text=transcript_text, history=history_list):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
 
         except Exception as exc:
             logger.exception("Unhandled error in audio agent pipeline")
@@ -414,6 +436,58 @@ async def execute_action(
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"Failed to forget: {exc}") from exc
 
+    elif action == "create_watcher":
+        from app.database.watcher_store import save_watcher, save_watcher_trigger, save_watcher_action  # noqa: PLC0415
+        from app.agents.watcher_builder import compile_trigger_dsl  # noqa: PLC0415
+        import uuid  # noqa: PLC0415
+        try:
+            watcher_id = str(uuid.uuid4())
+            provider = data.get("provider", "gmail")
+            desc = data.get("description", "")
+            actions_list = data.get("actions", ["notify"])
+            if isinstance(actions_list, str):
+                actions_list = [a.strip() for a in actions_list.split(",") if a.strip()]
+
+            condition_json = compile_trigger_dsl(provider, desc)
+            save_watcher(user_id, watcher_id, desc, enabled=True)
+
+            event_type = "email_received" if provider == "gmail" else "event_updated"
+            save_watcher_trigger(user_id, watcher_id, provider, event_type, condition_json)
+
+            for idx, action_type in enumerate(actions_list):
+                save_watcher_action(user_id, watcher_id, action_type, {}, idx)
+
+            return {
+                "status": "success",
+                "message": f"Successfully created Watcher '{desc}' to monitor {provider}."
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Failed to create watcher")
+            raise HTTPException(status_code=500, detail=f"Failed to create watcher: {exc}") from exc
+
+    elif action == "delete_watcher":
+        from app.database.watcher_store import delete_watcher, load_watchers  # noqa: PLC0415
+        try:
+            watcher_id = data.get("watcher_id")
+            desc = data.get("description", "")
+
+            if not watcher_id and desc:
+                watchers = load_watchers(user_id)
+                for w in watchers:
+                    if desc.lower() in w["description"].lower():
+                        watcher_id = w["id"]
+                        desc = w["description"]
+                        break
+
+            if not watcher_id:
+                raise ValueError(f"No watcher matching '{desc or watcher_id}' found.")
+
+            delete_watcher(user_id, watcher_id)
+            return {"status": "success", "message": f"Successfully deleted Watcher '{desc or watcher_id}'."}
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Failed to delete watcher")
+            raise HTTPException(status_code=500, detail=f"Failed to delete watcher: {exc}") from exc
+
     else:
         raise HTTPException(status_code=400, detail=f"Unknown action: {action}")
 
@@ -460,7 +534,302 @@ async def delete_memory_entry(category: str, key: str) -> dict:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+# ── Step Resumption Endpoint ──────────────────────────────────────────────────
+
+class ResumePlanRequest(BaseModel):
+    plan_id: str
+    step_id: int
+    edited_data: dict | None = None
+
+
+def _execute_write_step_action(action: str, parameters: dict, user_id: str) -> str:
+    """Invokes the real write action python tool function."""
+    if action == "draft_email":
+        from app.tools.email_tools import send_email_via_gmail  # noqa: PLC0415
+        return send_email_via_gmail(
+            to=parameters.get("recipient", ""),
+            subject=parameters.get("subject", ""),
+            body=parameters.get("body", ""),
+            user_id=user_id
+        )
+    elif action == "delete_email":
+        from app.tools.email_tools import delete_email_via_gmail  # noqa: PLC0415
+        return delete_email_via_gmail(
+            email_id=parameters.get("email_id", ""),
+            sender=parameters.get("sender"),
+            subject=parameters.get("subject"),
+            user_id=user_id
+        )
+    elif action == "create_event":
+        from app.tools.calendar_tools import create_google_calendar_event  # noqa: PLC0415
+        return create_google_calendar_event(
+            title=parameters.get("title", "Meeting"),
+            date=parameters.get("date", ""),
+            time=parameters.get("time", "09:00"),
+            duration_minutes=int(parameters.get("duration_minutes", 60)),
+            attendees=parameters.get("attendees", []),
+            user_id=user_id
+        )
+    elif action == "reschedule_event":
+        from app.tools.calendar_tools import reschedule_google_calendar_event  # noqa: PLC0415
+        return reschedule_google_calendar_event(
+            event_id=parameters.get("event_id", ""),
+            title=parameters.get("title", ""),
+            new_date=parameters.get("new_date", ""),
+            new_time=parameters.get("new_time", ""),
+            new_duration_minutes=int(parameters.get("new_duration_minutes", 60) or 60),
+            user_id=user_id
+        )
+    elif action == "delete_event":
+        from app.tools.calendar_tools import delete_google_calendar_event  # noqa: PLC0415
+        return delete_google_calendar_event(
+            event_id=parameters.get("event_id", ""),
+            title=parameters.get("title", ""),
+            user_id=user_id
+        )
+    elif action == "save_contact":
+        from app.agents.memory_manager import save_contact as mem_save_contact  # noqa: PLC0415
+        mem_save_contact(
+            user_id=user_id,
+            name=parameters.get("name", ""),
+            email=parameters.get("email"),
+            phone=parameters.get("phone"),
+            company=parameters.get("company"),
+            notes=parameters.get("notes"),
+        )
+        return f"Remembered contact '{parameters.get('name')}'."
+    elif action == "save_preference":
+        from app.agents.memory_manager import save_preference as mem_save_pref  # noqa: PLC0415
+        val = parameters.get("value")
+        try:
+            val = json.loads(val)
+        except Exception:  # noqa: BLE001
+            pass
+        mem_save_pref(
+            user_id=user_id,
+            category=parameters.get("category", ""),
+            key=parameters.get("key", ""),
+            value=val,
+        )
+        return f"Remembered preference '{parameters.get('category')}/{parameters.get('key')}'."
+    elif action == "save_routine":
+        from app.agents.memory_manager import save_routine as mem_save_routine  # noqa: PLC0415
+        steps_val = parameters.get("steps", "")
+        steps = steps_val if isinstance(steps_val, list) else [s.strip() for s in steps_val.split(",") if s.strip()]
+        mem_save_routine(
+            user_id=user_id,
+            name=parameters.get("name", ""),
+            steps=steps,
+        )
+        return f"Remembered routine '{parameters.get('name')}'."
+    elif action == "save_knowledge":
+        from app.agents.memory_manager import save_knowledge as mem_save_knowledge  # noqa: PLC0415
+        mem_save_knowledge(
+            user_id=user_id,
+            text=parameters.get("text", ""),
+            importance=int(parameters.get("importance", 1)),
+        )
+        return "Fact stored in long-term memory."
+    elif action == "delete_memory":
+        category = parameters.get("category", "")
+        key = parameters.get("key", "")
+        if category == "contacts":
+            from app.agents.memory_manager import delete_contact  # noqa: PLC0415
+            delete_contact(user_id, key)
+        elif category == "preferences":
+            parts = key.split("/")
+            if len(parts) == 2:
+                from app.agents.memory_manager import delete_preference  # noqa: PLC0415
+                delete_preference(user_id, parts[0], parts[1])
+        elif category == "routines":
+            from app.agents.memory_manager import delete_routine  # noqa: PLC0415
+            delete_routine(user_id, key)
+        elif category == "knowledge":
+            from app.agents.memory_manager import delete_knowledge  # noqa: PLC0415
+            delete_knowledge(user_id, key)
+        return f"Forgot '{key}'."
+
+    elif action == "create_watcher":
+        from app.database.watcher_store import save_watcher, save_watcher_trigger, save_watcher_action  # noqa: PLC0415
+        from app.agents.watcher_builder import compile_trigger_dsl  # noqa: PLC0415
+        import uuid  # noqa: PLC0415
+        watcher_id = str(uuid.uuid4())
+        provider = parameters.get("provider", "gmail")
+        desc = parameters.get("description", "")
+        actions_list = parameters.get("actions", ["notify"])
+        if isinstance(actions_list, str):
+            actions_list = [a.strip() for a in actions_list.split(",") if a.strip()]
+
+        condition_json = compile_trigger_dsl(provider, desc)
+        save_watcher(user_id, watcher_id, desc, enabled=True)
+
+        event_type = "email_received" if provider == "gmail" else "event_updated"
+        save_watcher_trigger(user_id, watcher_id, provider, event_type, condition_json)
+
+        for idx, action_type in enumerate(actions_list):
+            save_watcher_action(user_id, watcher_id, action_type, {}, idx)
+
+        return f"Successfully created Watcher '{desc}' to monitor {provider}."
+
+    elif action == "delete_watcher":
+        from app.database.watcher_store import delete_watcher, load_watchers  # noqa: PLC0415
+        watcher_id = parameters.get("watcher_id")
+        desc = parameters.get("description", "")
+
+        if not watcher_id and desc:
+            watchers = load_watchers(user_id)
+            for w in watchers:
+                if desc.lower() in w["description"].lower():
+                    watcher_id = w["id"]
+                    desc = w["description"]
+                    break
+
+        if not watcher_id:
+            raise ValueError(f"No watcher matching '{desc or watcher_id}' found.")
+
+        delete_watcher(user_id, watcher_id)
+        return f"Successfully deleted Watcher '{desc or watcher_id}'."
+
+    else:
+        raise ValueError(f"Unknown action: {action}")
+
+
+@app.post("/agent/resume-plan", tags=["Agent"])
+async def resume_plan(body: ResumePlanRequest) -> StreamingResponse:
+    """
+    Called when the user approves a paused workflow step in Flutter.
+    Runs the approved action, updates plan status, and streams the remaining execution logs.
+    """
+    user_id = settings.DEV_USER_ID
+    logger.info("Resuming plan %s, approved step %d", body.plan_id, body.step_id)
+
+    async def resume_stream():
+        try:
+            # 1. Load active plan record
+            record = load_active_plan_record(body.plan_id)
+            if not record:
+                yield f"data: {json.dumps({'type': 'error', 'message': 'Active plan not found.'})}\n\n"
+                return
+
+            plan_json = record.get("plan_json")
+            user_text = record.get("user_text", "")
+            history = record.get("history", [])
+
+            plan = TaskPlan.model_validate(plan_json)
+
+            # 2. Locate step
+            step = next((s for s in plan.steps if s.step_id == body.step_id), None)
+            if not step:
+                yield f"data: {json.dumps({'type': 'error', 'message': f'Step {body.step_id} not found in plan.'})}\n\n"
+                return
+
+            if step.status != "running" or not step.requires_confirmation:
+                yield f"data: {json.dumps({'type': 'error', 'message': f'Step {body.step_id} is not awaiting approval.'})}\n\n"
+                return
+
+            # 3. Apply edits if provided
+            if body.edited_data:
+                logger.info("Applying user edits to step parameters: %s", body.edited_data)
+                if step.action == "draft_email":
+                    step.parameters["recipient"] = body.edited_data.get("to", step.parameters.get("recipient"))
+                    step.parameters["subject"] = body.edited_data.get("subject", step.parameters.get("subject"))
+                    step.parameters["body"] = body.edited_data.get("body", step.parameters.get("body"))
+                elif step.action == "create_event":
+                    step.parameters["title"] = body.edited_data.get("title", step.parameters.get("title"))
+                    step.parameters["date"] = body.edited_data.get("date", step.parameters.get("date"))
+                    step.parameters["time"] = body.edited_data.get("time", step.parameters.get("time"))
+                    step.parameters["duration_minutes"] = int(body.edited_data.get("duration_minutes", step.parameters.get("duration_minutes") or 60))
+                    step.parameters["attendees"] = body.edited_data.get("attendees", step.parameters.get("attendees"))
+                else:
+                    for k, v in body.edited_data.items():
+                        if k not in ["plan_id", "step_id", "safety_warning", "requires_double_confirm", "safety_level"]:
+                            step.parameters[k] = v
+
+            # 4. Execute the approved step
+            yield f"data: {json.dumps({'type': 'log', 'message': f'⚡ Executing approved action: {step.description}'}, ensure_ascii=False)}\n\n"
+            
+            try:
+                # Execute tool function in worker thread
+                result_text = await asyncio.to_thread(_execute_write_step_action, step.action, step.parameters, user_id)
+                step.status = "completed"
+                step.output = result_text
+                yield f"data: {json.dumps({'type': 'log', 'message': f'✅ {result_text}'}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'type': 'tool_result', 'step_id': step.step_id, 'result': result_text}, ensure_ascii=False)}\n\n"
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Approved step execution failed")
+                step.status = "failed"
+                save_active_plan(plan)
+                yield f"data: {json.dumps({'type': 'error', 'message': f'Action execution failed: {exc}'}, ensure_ascii=False)}\n\n"
+                return
+
+            save_active_plan(plan)
+
+            # 5. Resume execution of the rest of the plan
+            async for event in execute_plan(plan, user_text=user_text, history=history):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Unhandled error in plan resumption")
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+        finally:
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+    return StreamingResponse(
+        resume_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ── Watchers REST APIs ────────────────────────────────────────────────────────
+
+
+@app.get("/agent/watchers", tags=["Watchers"])
+async def get_watchers() -> list[dict]:
+    """Retrieve all watchers for the active user."""
+    from app.database.watcher_store import load_watchers  # noqa: PLC0415
+    return load_watchers(settings.DEV_USER_ID)
+
+
+@app.post("/agent/watchers/{watcher_id}/toggle", tags=["Watchers"])
+async def toggle_watcher(watcher_id: str) -> dict:
+    """Toggle a watcher state (enabled/disabled)."""
+    from app.database.watcher_store import load_watchers, save_watcher  # noqa: PLC0415
+    user_id = settings.DEV_USER_ID
+    watchers = load_watchers(user_id)
+    target = None
+    for w in watchers:
+        if w["id"] == watcher_id:
+            target = w
+            break
+    if not target:
+        raise HTTPException(status_code=404, detail="Watcher not found")
+
+    new_state = not target["enabled"]
+    save_watcher(user_id, watcher_id, target["description"], enabled=new_state)
+    return {"status": "success", "enabled": new_state}
+
+
+@app.delete("/agent/watchers/{watcher_id}", tags=["Watchers"])
+async def delete_watcher_endpoint(watcher_id: str) -> dict:
+    """Delete a watcher configuration."""
+    from app.database.watcher_store import delete_watcher  # noqa: PLC0415
+    delete_watcher(settings.DEV_USER_ID, watcher_id)
+    return {"status": "success", "message": "Watcher deleted."}
+
+
+@app.get("/agent/watchers/{watcher_id}/history", tags=["Watchers"])
+async def get_watcher_history_endpoint(watcher_id: str) -> list[dict]:
+    """Retrieve execution log history for a watcher."""
+    from app.database.watcher_store import load_watcher_history  # noqa: PLC0415
+    return load_watcher_history(settings.DEV_USER_ID, watcher_id)
+
+
 # ── Dev entry point ───────────────────────────────────────────────────────────
+
 
 if __name__ == "__main__":
     uvicorn.run(

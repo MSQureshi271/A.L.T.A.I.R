@@ -11,6 +11,7 @@
 .svn/
 .swiftpm/
 migrate_working_dir/
+backend/latest_received_command.m4a
 
 # IntelliJ related
 *.iml

@@ -327,9 +327,10 @@ The Executor walks the graph topologically:
 CREATE TABLE active_plans (
     plan_id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
     user_id UUID NOT NULL,
-    status TEXT NOT NULL,             -- "pending", "awaiting_approval", "complete", "failed"
-    plan_json JSONB NOT NULL,         -- full TaskGraph serialised
-    current_step_id INT,
+    status TEXT NOT NULL,             -- "pending", "awaiting_approval", "completed", "failed"
+    plan_json JSONB NOT NULL,         -- full TaskPlan model representation
+    user_text TEXT,                   -- original natural language command
+    history JSONB DEFAULT '[]'::jsonb,-- conversation history
     created_at TIMESTAMP DEFAULT now(),
     updated_at TIMESTAMP DEFAULT now()
 );

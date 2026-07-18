@@ -364,3 +364,65 @@ def delete_google_calendar_event(
     return f"✅ Event '{event_summary}' has been deleted."
 
 
+def prefetch_upcoming_events(user_id: str, limit: int = 3) -> list[dict]:
+    """Prefetch the next upcoming calendar events silently.
+
+    Returns:
+        A list of simplified event dictionaries: [{'title': str, 'start': str, 'attendees': list[str]}].
+        Fails silently on credentials issue or connection errors, returning [].
+    """
+    try:
+        creds = get_google_credentials(user_id)
+        if not creds:
+            return []
+
+        service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+        user_tz = _get_primary_timezone(service)
+
+        now = datetime.datetime.utcnow()
+        time_min = now.isoformat() + "Z"
+        time_max = (now + datetime.timedelta(days=7)).isoformat() + "Z"
+
+        events_result = (
+            service.events()
+            .list(
+                calendarId="primary",
+                timeMin=time_min,
+                timeMax=time_max,
+                maxResults=limit,
+                singleEvents=True,
+                orderBy="startTime",
+                timeZone=user_tz,
+            )
+            .execute()
+        )
+
+        events = events_result.get("items", [])
+        results = []
+        for event in events:
+            start = event.get("start", {})
+            start_str = start.get("dateTime", start.get("date", "Unknown"))
+
+            try:
+                if "T" in start_str:
+                    dt = datetime.datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+                    formatted = dt.strftime("%Y-%m-%d %H:%M")
+                else:
+                    dt = datetime.date.fromisoformat(start_str)
+                    formatted = dt.strftime("%Y-%m-%d (all day)")
+            except ValueError:
+                formatted = start_str
+
+            attendees = [a.get("email") for a in event.get("attendees", []) if a.get("email")]
+            results.append({
+                "title": event.get("summary", "(No title)"),
+                "start": formatted,
+                "attendees": attendees,
+            })
+        return results
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Silent calendar prefetch failed: %s", exc)
+        return []
+
+
+

@@ -6,6 +6,7 @@ import '../services/auth_notifier.dart';
 import '../services/auth_service.dart';
 import '../views/connectors_view.dart';
 import '../views/memory_view.dart';
+import '../views/watchers_view.dart';
 
 
 /// Left-side navigation drawer.
@@ -202,6 +203,41 @@ class _AppDrawerState extends ConsumerState<AppDrawer> {
                   Navigator.push(
                     context,
                     MaterialPageRoute(builder: (_) => const MemoryView()),
+                  );
+                },
+              ),
+            ),
+
+            Divider(color: Colors.white.withOpacity(0.06)),
+
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 4),
+              child: Text(
+                'WATCHERS',
+                style: GoogleFonts.outfit(
+                  color: const Color(0xFF6C757D),
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 1.5,
+                ),
+              ),
+            ),
+
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 2),
+              child: ListTile(
+                contentPadding: EdgeInsets.zero,
+                minLeadingWidth: 24,
+                leading: const Icon(Icons.visibility_outlined, color: Color(0xFFE0A100), size: 18),
+                title: Text(
+                  'Active Watchers',
+                  style: GoogleFonts.outfit(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.w500),
+                ),
+                onTap: () {
+                  Navigator.pop(context); // Close drawer
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const WatchersView()),
                   );
                 },
               ),

@@ -338,6 +338,128 @@ class ApiService {
     }
   }
 
+  /// Resumes execution of a paused plan on the backend.
+  /// Streams logs, intermediate tool updates, and final result back via SSE.
+  Future<ProcessCommandResult> resumePlan({
+    required String planId,
+    required int stepId,
+    Map<String, dynamic>? editedData,
+    required Function(String logText) onLogUpdate,
+    required Function(Map<String, dynamic> updatedPlan) onPlanUpdate,
+    required Function(int stepId, String result) onToolResult,
+  }) async {
+    onLogUpdate('⏳ Resuming plan execution…');
+
+    try {
+      final uri = Uri.parse('$_backendBaseUrl/agent/resume-plan');
+
+      final request = http.Request('POST', uri)
+        ..headers['Content-Type'] = 'application/json'
+        ..headers['Accept'] = 'text/event-stream'
+        ..body = jsonEncode({
+          'plan_id': planId,
+          'step_id': stepId,
+          'edited_data': editedData,
+        });
+
+      final http.StreamedResponse streamed =
+          await http.Client().send(request).timeout(
+                const Duration(seconds: 90),
+                onTimeout: () => throw TimeoutException('Resume plan request timeout'),
+              );
+
+      if (streamed.statusCode != 200) {
+        throw Exception('Backend returned ${streamed.statusCode}');
+      }
+
+      PendingAction? pendingAction;
+      String? textResponse;
+      List<Map<String, dynamic>>? updatedHistory;
+      Map<String, dynamic>? receivedPlan;
+      String? currentSafetyWarning;
+      bool currentRequiresDoubleConfirm = false;
+      String? currentSafetyLevel;
+
+      await for (final chunk
+          in streamed.stream.transform(utf8.decoder).transform(const LineSplitter())) {
+        if (!chunk.startsWith('data: ')) continue;
+
+        final raw = chunk.substring(6).trim();
+        if (raw.isEmpty) continue;
+
+        final Map<String, dynamic> event = jsonDecode(raw);
+        final String type = event['type'] as String? ?? '';
+
+        switch (type) {
+          case 'log':
+            onLogUpdate(event['message'] as String? ?? '');
+            break;
+
+          case 'plan':
+            receivedPlan = Map<String, dynamic>.from(event['plan'] as Map? ?? {});
+            onPlanUpdate(receivedPlan);
+            break;
+
+          case 'tool_result':
+            final step = event['step_id'] as int? ?? 0;
+            final result = event['result'] as String? ?? '';
+            onToolResult(step, result);
+            break;
+
+          case 'result':
+            textResponse = event['text'] as String?;
+            onLogUpdate('✅ ${textResponse ?? 'Done.'}');
+            break;
+
+          case 'history_update':
+            updatedHistory = (event['history'] as List<dynamic>?)
+                ?.map((e) => Map<String, dynamic>.from(e as Map))
+                .toList();
+            break;
+
+          case 'safety_warning':
+            currentSafetyWarning = event['message'] as String?;
+            currentRequiresDoubleConfirm = event['requires_double_confirm'] as bool? ?? false;
+            currentSafetyLevel = event['level'] as String?;
+            break;
+
+          case 'approval_required':
+            final actionData = Map<String, dynamic>.from(event['data'] as Map? ?? {});
+            pendingAction = PendingAction(
+              id: _uuid.v4(),
+              actionType: event['action'] as String? ?? 'unknown',
+              data: actionData,
+              safetyWarning: currentSafetyWarning ?? actionData['safety_warning'] as String?,
+              requiresDoubleConfirm: currentRequiresDoubleConfirm || (actionData['requires_double_confirm'] as bool? ?? false),
+              safetyLevel: currentSafetyLevel ?? actionData['safety_level'] as String?,
+            );
+            onLogUpdate('🚦 Staged! Awaiting your approval…');
+            currentSafetyWarning = null;
+            currentRequiresDoubleConfirm = false;
+            currentSafetyLevel = null;
+            break;
+
+          case 'error':
+            throw Exception(event['message'] ?? 'Unknown backend error');
+
+          case 'done':
+            break;
+        }
+      }
+
+      return ProcessCommandResult(
+        pendingAction: pendingAction,
+        textResponse: textResponse,
+        updatedHistory: updatedHistory,
+        plan: receivedPlan,
+      );
+
+    } catch (e) {
+      onLogUpdate('⚠️  Resuming plan failed: $e');
+      rethrow;
+    }
+  }
+
 
   // ── Memory Management API ──────────────────────────────────────────────────
 
@@ -392,6 +514,73 @@ class ApiService {
     } catch (e) {
       // Offline fallback: do nothing, mock delete succeeds
       debugPrint('Warning: Delete memory API offline, fallback simulation: $e');
+    }
+  }
+
+  // ── Watcher REST Client APIs ───────────────────────────────────────────────
+
+  /// Fetch all watchers.
+  Future<List<Map<String, dynamic>>> getWatchers() async {
+    try {
+      final uri = Uri.parse('$_backendBaseUrl/agent/watchers');
+      final response = await http.get(uri).timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final List<dynamic> data = json.decode(response.body);
+        return data.cast<Map<String, dynamic>>();
+      }
+      throw Exception('Failed to load watchers: ${response.statusCode}');
+    } catch (e) {
+      debugPrint('Warning: Get watchers API offline, returning fallback empty list: $e');
+      return [];
+    }
+  }
+
+  /// Toggle a watcher's state (enabled/disabled).
+  Future<bool> toggleWatcher(String watcherId) async {
+    try {
+      final uri = Uri.parse('$_backendBaseUrl/agent/watchers/$watcherId/toggle');
+      final response = await http.post(uri).timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final Map<String, dynamic> data = json.decode(response.body);
+        return data['enabled'] ?? false;
+      }
+      throw Exception('Failed to toggle watcher: ${response.statusCode}');
+    } catch (e) {
+      debugPrint('Warning: Toggle watcher API offline: $e');
+      return false;
+    }
+  }
+
+  /// Delete a watcher.
+  Future<void> deleteWatcher(String watcherId) async {
+    try {
+      final uri = Uri.parse('$_backendBaseUrl/agent/watchers/$watcherId');
+      final response = await http.delete(uri).timeout(const Duration(seconds: 10));
+
+      if (response.statusCode != 200) {
+        throw Exception('Failed to delete watcher: ${response.statusCode}');
+      }
+    } catch (e) {
+      debugPrint('Warning: Delete watcher API offline: $e');
+    }
+  }
+
+  /// Fetch history execution logs for a watcher.
+  Future<List<Map<String, dynamic>>> getWatcherHistory(String watcherId) async {
+    try {
+      final uri = Uri.parse('$_backendBaseUrl/agent/watchers/$watcherId/history');
+      final response = await http.get(uri).timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final List<dynamic> data = json.decode(response.body);
+        return data.cast<Map<String, dynamic>>();
+      }
+      throw Exception('Failed to load watcher history: ${response.statusCode}');
+    } catch (e) {
+      debugPrint('Warning: Get watcher history API offline: $e');
+      return [];
     }
   }
 

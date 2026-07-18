@@ -34,6 +34,8 @@ TODAY IS: {today}
 
 {memory_context}
 
+{session_context}
+
 ━━━ AVAILABLE ACTIONS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
@@ -140,6 +142,22 @@ Tool: memory
     }}
     requires_confirmation: true   ← write action, always true
 
+Tool: watcher
+  action: "create_watcher"
+    parameters: {{
+      "provider": <str, 'gmail' | 'calendar'>,
+      "description": <str, natural language trigger condition e.g. 'emails from Amazon mentioning pricing'>,
+      "actions": <list of str, e.g. ['notify'] or ['summarize', 'notify']>
+    }}
+    requires_confirmation: true   ← write action, always true
+
+  action: "delete_watcher"
+    parameters: {{
+      "watcher_id": <str, unique watcher ID if known>,
+      "description": <str, keyword to find the watcher to delete>
+    }}
+    requires_confirmation: true   ← write action, always true
+
 Tool: none
 
   action: "clarify"
@@ -149,7 +167,7 @@ Tool: none
 
 ━━━ RULES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-1. requires_confirmation MUST be true for: draft_email, delete_email, create_event, reschedule_event, delete_event, save_contact, save_preference, save_routine, save_knowledge, delete_memory.
+1. requires_confirmation MUST be true for: draft_email, delete_email, create_event, reschedule_event, delete_event, save_contact, save_preference, save_routine, save_knowledge, delete_memory, create_watcher, delete_watcher.
 2. requires_confirmation MUST be false for: read_emails, read_email_details, get_events, search_web.
 3. If the user's request is genuinely ambiguous (e.g. "email someone" with no
    name, or "schedule something" with no date or title), set ambiguity_question
@@ -251,6 +269,24 @@ User: "Cancel my 10 AM meeting tomorrow."
        "description": "Delete 10 AM calendar event tomorrow." }}
   ]
 
+User: "Watch my inbox for emails from Amazon and notify me."
+→ intent_summary: "Set up a watcher for Amazon emails in Gmail."
+→ steps: [
+    {{ "step_id": 1, "tool": "watcher", "action": "create_watcher",
+       "parameters": {{ "provider": "gmail", "description": "emails from Amazon", "actions": ["notify"] }},
+       "requires_confirmation": true, "depends_on": [],
+       "description": "Watch inbox for Amazon emails." }}
+  ]
+
+User: "Stop watching Amazon emails"
+→ intent_summary: "Delete watcher for Amazon emails."
+→ steps: [
+    {{ "step_id": 1, "tool": "watcher", "action": "delete_watcher",
+       "parameters": {{ "description": "Amazon" }},
+       "requires_confirmation": true, "depends_on": [],
+       "description": "Remove Amazon email watcher." }}
+  ]
+
 User: "Send an email."
 → intent_summary: "Draft an email (recipient and content unknown)."
 → steps: []
@@ -306,15 +342,50 @@ def plan(user_text: str, history: list[dict] | None = None) -> TaskPlan:
     today_str, tomorrow_str, next_monday_str = _date_context()
 
     from app.agents.memory_manager import resolve_memory_context  # noqa: PLC0415
+    from app.agents.context_resolver import resolve_session_context  # noqa: PLC0415
     from app.config import settings  # noqa: PLC0415
+    
     memory_context_str = resolve_memory_context(settings.DEV_USER_ID)
+    session_ctx = resolve_session_context(history or [], settings.DEV_USER_ID)
+
+    # Format session context segment
+    ctx_parts = ["━━━ SESSION CONTEXT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
+    if session_ctx.last_mentioned_people:
+        ctx_parts.append("- Last Mentioned People:")
+        for p in session_ctx.last_mentioned_people:
+            ctx_parts.append(f"  * {p['name']} ({p['email']})")
+    else:
+        ctx_parts.append("- Last Mentioned People: None")
+
+    if session_ctx.upcoming_events:
+        ctx_parts.append("- Upcoming Calendar Events:")
+        for e in session_ctx.upcoming_events:
+            atts = f" with {', '.join(e['attendees'])}" if e.get("attendees") else ""
+            ctx_parts.append(f"  * \"{e['title']}\" at {e['start']}{atts}")
+    else:
+        ctx_parts.append("- Upcoming Calendar Events: None")
+
+    if session_ctx.last_action:
+        la = session_ctx.last_action
+        ctx_parts.append(f"- Last Action Taken: {la.get('description')} (Tool: {la.get('tool')}, Action: {la.get('action')})")
+    else:
+        ctx_parts.append("- Last Action Taken: None")
+
+    if session_ctx.active_plan_id:
+        ctx_parts.append(f"- Active Plan ID: {session_ctx.active_plan_id}")
+    else:
+        ctx_parts.append("- Active Plan ID: None")
+
+    session_context_str = "\n".join(ctx_parts)
 
     system_prompt = _PLANNER_SYSTEM_PROMPT.format(
         today=today_str,
         tomorrow=tomorrow_str,
         next_monday=next_monday_str,
         memory_context=memory_context_str,
+        session_context=session_context_str,
     )
+
 
 
     history_text = _history_block(history or [])

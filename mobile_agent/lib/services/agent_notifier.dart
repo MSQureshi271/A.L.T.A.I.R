@@ -181,27 +181,74 @@ class AgentNotifier extends Notifier<AgentState> {
       activeLog: 'Executing action: ${action.actionType}…',
     );
 
+    final planId = action.data['plan_id'] as String?;
+    final stepId = action.data['step_id'] as int?;
+
     try {
-      final result = await _apiService.executeAction(action);
+      if (planId != null && stepId != null) {
+        // Multi-step resumption stream
+        final result = await _apiService.resumePlan(
+          planId: planId,
+          stepId: stepId,
+          editedData: action.data,
+          onLogUpdate: (log) {
+            state = state.copyWith(activeLog: log);
+          },
+          onPlanUpdate: (updatedPlan) {
+            state = state.copyWith(currentPlan: updatedPlan);
+          },
+          onToolResult: (step, res) {
+            // Can update UI state logs if needed
+          },
+        );
 
-      final agentMessage = ChatMessage(
-        id: _uuid.v4(),
-        text: result,
-        timestamp: DateTime.now(),
-        sender: SenderType.agent,
-        subLogs: [
-          '✅ Connection verified',
-          '📧 API payload dispatched',
-          '🚀 Delivery complete',
-        ],
-      );
+        final newMessages = List<ChatMessage>.from(state.messages);
+        if (result.textResponse != null) {
+          newMessages.add(
+            ChatMessage(
+              id: _uuid.v4(),
+              text: result.textResponse!,
+              timestamp: DateTime.now(),
+              sender: SenderType.agent,
+            ),
+          );
+        }
 
-      state = state.copyWith(
-        status: AgentStatus.idle,
-        messages: [...state.messages, agentMessage],
-        activeLog: 'Action executed successfully.',
-        clearPendingAction: true,
-      );
+        final isActionPending = result.pendingAction != null;
+        state = state.copyWith(
+          status: isActionPending ? AgentStatus.actionPending : AgentStatus.idle,
+          messages: newMessages,
+          pendingAction: result.pendingAction,
+          activeLog: isActionPending
+              ? 'Awaiting approval for staged action.'
+              : (result.textResponse != null ? 'Response received.' : 'Done.'),
+          conversationHistory: result.updatedHistory ?? state.conversationHistory,
+          currentPlan: result.plan ?? state.currentPlan,
+        );
+
+      } else {
+        // Standard legacy single action execute (fallback)
+        final result = await _apiService.executeAction(action);
+
+        final agentMessage = ChatMessage(
+          id: _uuid.v4(),
+          text: result,
+          timestamp: DateTime.now(),
+          sender: SenderType.agent,
+          subLogs: [
+            '✅ Connection verified',
+            '📧 API payload dispatched',
+            '🚀 Delivery complete',
+          ],
+        );
+
+        state = state.copyWith(
+          status: AgentStatus.idle,
+          messages: [...state.messages, agentMessage],
+          activeLog: 'Action executed successfully.',
+          clearPendingAction: true,
+        );
+      }
     } catch (e) {
       state = state.copyWith(
         status: AgentStatus.idle,

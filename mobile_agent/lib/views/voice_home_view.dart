@@ -8,6 +8,8 @@ import '../widgets/agent_status_card.dart';
 import '../widgets/approval_drawer.dart';
 import '../widgets/app_drawer.dart';
 import '../widgets/plan_preview_card.dart';
+import '../widgets/workflow_progress_card.dart';
+
 
 class VoiceHomeView extends ConsumerStatefulWidget {
   const VoiceHomeView({super.key});
@@ -352,9 +354,9 @@ class _VoiceHomeViewState extends ConsumerState<VoiceHomeView> {
 
         final extraIndex = index - state.messages.length;
 
-        // Second section: plan preview card (if available)
+        // Second section: plan progress stepper card (if available)
         if (showPlan && extraIndex == 0) {
-          return PlanPreviewCard(plan: state.currentPlan!);
+          return WorkflowProgressCard(plan: state.currentPlan!);
         }
 
         // Third section: processing indicator
