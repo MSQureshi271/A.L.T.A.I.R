@@ -9,11 +9,15 @@ from pathlib import Path
 # Add backend directory to python path
 sys.path.append(str(Path(__file__).parents[2]))
 
+import io
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
 from dotenv import load_dotenv
 load_dotenv()
 
-from app.agents.planner_schema import TaskPlan, TaskStep
-from app.agents.executor import execute_plan, load_active_plan, save_active_plan
+from app.ai.planner.planner_schema import TaskPlan, TaskStep
+from app.ai.executor.executor import execute_plan, load_active_plan, save_active_plan
 
 # Mock the actual gmail send so we don't send emails during test runs
 import app.main

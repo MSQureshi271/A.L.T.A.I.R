@@ -11,7 +11,7 @@ sys.path.append(str(Path(__file__).parents[2]))
 from dotenv import load_dotenv
 load_dotenv()
 
-from app.tools.search_tools import search_web
+from app.capabilities.search.search_tools import search_web
 
 def main():
     print("Testing Google Search Grounding...")

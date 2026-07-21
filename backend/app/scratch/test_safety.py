@@ -3,10 +3,15 @@ app/scratch/test_safety.py — Safety classifier unit checks.
 """
 from __future__ import annotations
 
+import sys
+import io
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
 from unittest.mock import MagicMock, patch
 
-from app.agents.planner_schema import TaskStep
-from app.agents.safety import classify
+from app.ai.planner.planner_schema import TaskStep
+from app.ai.safety.safety import classify
 
 
 def test_classify_safe():
@@ -37,8 +42,8 @@ def test_classify_caution():
     print("test_classify_caution passed!")
 
 
-@patch("app.agents.safety.build")
-@patch("app.agents.safety.get_google_credentials")
+@patch("app.ai.safety.safety.build")
+@patch("app.ai.safety.safety.get_google_credentials")
 def test_classify_dangerous_bulk_email(mock_get_creds, mock_build):
     mock_service = MagicMock()
     mock_build.return_value = mock_service
@@ -61,8 +66,8 @@ def test_classify_dangerous_bulk_email(mock_get_creds, mock_build):
     print("test_classify_dangerous_bulk_email passed!")
 
 
-@patch("app.agents.safety.build")
-@patch("app.agents.safety.get_google_credentials")
+@patch("app.ai.safety.safety.build")
+@patch("app.ai.safety.safety.get_google_credentials")
 def test_classify_dangerous_calendar_delete(mock_get_creds, mock_build):
     mock_service = MagicMock()
     mock_build.return_value = mock_service

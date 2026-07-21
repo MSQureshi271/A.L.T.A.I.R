@@ -12,8 +12,8 @@ sys.path.append(str(Path(__file__).parents[2]))
 from dotenv import load_dotenv
 load_dotenv()
 
-from app.agents.context_resolver import resolve_session_context
-from app.agents.planner import plan as planner_plan
+from app.ai.reasoning.context_resolver import resolve_session_context
+from app.ai.planner.planner import plan as planner_plan
 
 
 async def run_test():
@@ -38,7 +38,7 @@ async def run_test():
     # Check if context resolver successfully parsed Sarah
     assert len(context.last_mentioned_people) > 0, "Failed: Mentioned people list empty"
     assert context.last_mentioned_people[0]["email"] == "sarah@acme.com", "Failed: Email mismatch"
-    print("✅ Context Resolver successfully extracted Sarah Ahmed from history logs!")
+    print("OK: Context Resolver successfully extracted Sarah Ahmed from history logs!")
 
     print("\n--- Calling Planner to verify Pronoun Resolution ('her' -> sarah@acme.com) ---")
     # Follow up query using pronoun 'her'
@@ -57,9 +57,9 @@ async def run_test():
         print(f"Resolved recipient: {recipient}")
         assert "sarah@acme.com" in recipient, f"Failed: Recipient was resolved to '{recipient}' instead of 'sarah@acme.com'"
         
-        print("\n🎉 SUCCESS! Gemini successfully resolved 'her' -> 'sarah@acme.com' using the SessionContext!")
+        print("\nSUCCESS! Gemini successfully resolved 'her' -> 'sarah@acme.com' using the SessionContext!")
     except Exception as exc:
-        print(f"\n❌ Test Failed: {exc}")
+        print(f"\nTest Failed: {exc}")
 
 
 if __name__ == "__main__":

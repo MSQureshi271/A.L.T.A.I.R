@@ -23,20 +23,20 @@ from typing import Annotated
 
 
 import uvicorn
-from fastapi import FastAPI, Body, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, BackgroundTasks, Body, File, Form, HTTPException, UploadFile, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
 
-from app.config import settings
-from app.agents.coordinator import run_agent, run_agent_audio
-from app.agents.planner import plan as planner_plan
-from app.agents.executor import execute_plan, save_active_plan, load_active_plan, load_active_plan_record
-from app.agents.planner_schema import TaskPlan, TaskStep
+from app.config.settings import settings
+from app.ai.coordinator import run_agent, run_agent_audio
+from app.ai.planner.planner import plan as planner_plan
+from app.ai.executor.executor import execute_plan, save_active_plan, load_active_plan, load_active_plan_record
+from app.ai.planner.planner_schema import TaskPlan, TaskStep
 
-from app.auth.router import router as auth_router
+from app.providers.google.oauth import router as auth_router
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     # Start the watcher scheduler loop
     import asyncio
-    from app.agents.watcher_scheduler import start_scheduler_loop  # noqa: PLC0415
+    from app.watchers.scheduler import start_scheduler_loop  # noqa: PLC0415
     task = asyncio.create_task(start_scheduler_loop())
     yield
     task.cancel()
@@ -277,7 +277,7 @@ async def execute_action(
 
     if action == "send_email":
         # Import here to avoid circular dependency issues at startup
-        from app.tools.email_tools import send_email_via_gmail  # noqa: PLC0415
+        from app.providers.google.gmail.api import send_email_via_gmail  # noqa: PLC0415
         try:
             message = send_email_via_gmail(
                 to=data.get("to", ""),
@@ -293,7 +293,7 @@ async def execute_action(
             raise HTTPException(status_code=500, detail=f"Gmail send failed: {exc}") from exc
 
     elif action == "delete_email":
-        from app.tools.email_tools import delete_email_via_gmail  # noqa: PLC0415
+        from app.providers.google.gmail.api import delete_email_via_gmail  # noqa: PLC0415
         try:
             message = delete_email_via_gmail(
                 email_id=data.get("email_id", ""),
@@ -310,7 +310,7 @@ async def execute_action(
             raise HTTPException(status_code=500, detail=f"Gmail delete failed: {exc}") from exc
 
     elif action == "create_calendar_event":
-        from app.tools.calendar_tools import create_google_calendar_event  # noqa: PLC0415
+        from app.providers.google.calendar.api import create_google_calendar_event  # noqa: PLC0415
         try:
             message = create_google_calendar_event(
                 title=data.get("title", "Meeting"),
@@ -328,7 +328,7 @@ async def execute_action(
             raise HTTPException(status_code=500, detail=f"Calendar error: {exc}") from exc
 
     elif action == "reschedule_calendar_event":
-        from app.tools.calendar_tools import reschedule_google_calendar_event  # noqa: PLC0415
+        from app.providers.google.calendar.api import reschedule_google_calendar_event  # noqa: PLC0415
         try:
             message = reschedule_google_calendar_event(
                 event_id=data.get("event_id", ""),
@@ -344,7 +344,7 @@ async def execute_action(
             raise HTTPException(status_code=500, detail=f"Calendar reschedule error: {exc}") from exc
 
     elif action == "delete_calendar_event":
-        from app.tools.calendar_tools import delete_google_calendar_event  # noqa: PLC0415
+        from app.providers.google.calendar.api import delete_google_calendar_event  # noqa: PLC0415
         try:
             message = delete_google_calendar_event(
                 event_id=data.get("event_id", ""),
@@ -357,7 +357,7 @@ async def execute_action(
             raise HTTPException(status_code=500, detail=f"Calendar deletion error: {exc}") from exc
 
     elif action == "save_contact":
-        from app.agents.memory_manager import save_contact as mem_save_contact  # noqa: PLC0415
+        from app.capabilities.memory.memory_manager import save_contact as mem_save_contact  # noqa: PLC0415
         try:
             mem_save_contact(
                 user_id=user_id,
@@ -372,7 +372,7 @@ async def execute_action(
             raise HTTPException(status_code=500, detail=f"Failed to save contact: {exc}") from exc
 
     elif action == "save_preference":
-        from app.agents.memory_manager import save_preference as mem_save_pref  # noqa: PLC0415
+        from app.capabilities.memory.memory_manager import save_preference as mem_save_pref  # noqa: PLC0415
         try:
             val = data.get("value")
             try:
@@ -390,7 +390,7 @@ async def execute_action(
             raise HTTPException(status_code=500, detail=f"Failed to save preference: {exc}") from exc
 
     elif action == "save_routine":
-        from app.agents.memory_manager import save_routine as mem_save_routine  # noqa: PLC0415
+        from app.capabilities.memory.memory_manager import save_routine as mem_save_routine  # noqa: PLC0415
         try:
             steps = [s.strip() for s in data.get("steps", "").split(",") if s.strip()]
             mem_save_routine(
@@ -403,7 +403,7 @@ async def execute_action(
             raise HTTPException(status_code=500, detail=f"Failed to save routine: {exc}") from exc
 
     elif action == "save_knowledge":
-        from app.agents.memory_manager import save_knowledge as mem_save_knowledge  # noqa: PLC0415
+        from app.capabilities.memory.memory_manager import save_knowledge as mem_save_knowledge  # noqa: PLC0415
         try:
             mem_save_knowledge(
                 user_id=user_id,
@@ -419,26 +419,25 @@ async def execute_action(
             category = data.get("category", "")
             key = data.get("key", "")
             if category == "contacts":
-                from app.agents.memory_manager import delete_contact  # noqa: PLC0415
+                from app.capabilities.memory.memory_manager import delete_contact  # noqa: PLC0415
                 delete_contact(user_id, key)
             elif category == "preferences":
                 parts = key.split("/")
                 if len(parts) == 2:
-                    from app.agents.memory_manager import delete_preference  # noqa: PLC0415
+                    from app.capabilities.memory.memory_manager import delete_preference  # noqa: PLC0415
                     delete_preference(user_id, parts[0], parts[1])
             elif category == "routines":
-                from app.agents.memory_manager import delete_routine  # noqa: PLC0415
+                from app.capabilities.memory.memory_manager import delete_routine  # noqa: PLC0415
                 delete_routine(user_id, key)
             elif category == "knowledge":
-                from app.agents.memory_manager import delete_knowledge  # noqa: PLC0415
+                from app.capabilities.memory.memory_manager import delete_knowledge  # noqa: PLC0415
                 delete_knowledge(user_id, key)
             return {"status": "success", "message": f"Forgot '{key}'."}
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"Failed to forget: {exc}") from exc
 
-    elif action == "create_watcher":
-        from app.database.watcher_store import save_watcher, save_watcher_trigger, save_watcher_action  # noqa: PLC0415
-        from app.agents.watcher_builder import compile_trigger_dsl  # noqa: PLC0415
+        from app.repositories.watcher_repository import save_watcher, save_watcher_trigger, save_watcher_action  # noqa: PLC0415
+        from app.watchers.builder import compile_trigger_dsl  # noqa: PLC0415
         import uuid  # noqa: PLC0415
         try:
             watcher_id = str(uuid.uuid4())
@@ -457,6 +456,14 @@ async def execute_action(
             for idx, action_type in enumerate(actions_list):
                 save_watcher_action(user_id, watcher_id, action_type, {}, idx)
 
+            # Register push/webhook watch subscription
+            if provider == "gmail":
+                from app.providers.google.gmail.watch import register_gmail_watch  # noqa: PLC0415
+                register_gmail_watch(user_id)
+            elif provider == "calendar":
+                from app.providers.google.calendar.watch import register_calendar_watch  # noqa: PLC0415
+                register_calendar_watch(user_id)
+
             return {
                 "status": "success",
                 "message": f"Successfully created Watcher '{desc}' to monitor {provider}."
@@ -465,8 +472,7 @@ async def execute_action(
             logger.exception("Failed to create watcher")
             raise HTTPException(status_code=500, detail=f"Failed to create watcher: {exc}") from exc
 
-    elif action == "delete_watcher":
-        from app.database.watcher_store import delete_watcher, load_watchers  # noqa: PLC0415
+        from app.repositories.watcher_repository import delete_watcher, load_watchers  # noqa: PLC0415
         try:
             watcher_id = data.get("watcher_id")
             desc = data.get("description", "")
@@ -495,7 +501,7 @@ async def execute_action(
 @app.get("/agent/memory", tags=["Memory"])
 async def get_all_memory() -> dict:
     """Retrieve all structured and unstructured memories for the user."""
-    from app.agents.memory_manager import (  # noqa: PLC0415
+    from app.capabilities.memory.memory_manager import (  # noqa: PLC0415
         load_contacts,
         load_preferences,
         load_routines,
@@ -516,18 +522,18 @@ async def delete_memory_entry(category: str, key: str) -> dict:
     user_id = settings.DEV_USER_ID
     try:
         if category == "contacts":
-            from app.agents.memory_manager import delete_contact  # noqa: PLC0415
+            from app.capabilities.memory.memory_manager import delete_contact  # noqa: PLC0415
             delete_contact(user_id, key)
         elif category == "preferences":
             parts = key.split("/")
             if len(parts) == 2:
-                from app.agents.memory_manager import delete_preference  # noqa: PLC0415
+                from app.capabilities.memory.memory_manager import delete_preference  # noqa: PLC0415
                 delete_preference(user_id, parts[0], parts[1])
         elif category == "routines":
-            from app.agents.memory_manager import delete_routine  # noqa: PLC0415
+            from app.capabilities.memory.memory_manager import delete_routine  # noqa: PLC0415
             delete_routine(user_id, key)
         elif category == "knowledge":
-            from app.agents.memory_manager import delete_knowledge  # noqa: PLC0415
+            from app.capabilities.memory.memory_manager import delete_knowledge  # noqa: PLC0415
             delete_knowledge(user_id, key)
         return {"status": "success", "message": f"Successfully deleted memory: {key}"}
     except Exception as exc:  # noqa: BLE001
@@ -545,7 +551,7 @@ class ResumePlanRequest(BaseModel):
 def _execute_write_step_action(action: str, parameters: dict, user_id: str) -> str:
     """Invokes the real write action python tool function."""
     if action == "draft_email":
-        from app.tools.email_tools import send_email_via_gmail  # noqa: PLC0415
+        from app.providers.google.gmail.api import send_email_via_gmail  # noqa: PLC0415
         return send_email_via_gmail(
             to=parameters.get("recipient", ""),
             subject=parameters.get("subject", ""),
@@ -553,7 +559,7 @@ def _execute_write_step_action(action: str, parameters: dict, user_id: str) -> s
             user_id=user_id
         )
     elif action == "delete_email":
-        from app.tools.email_tools import delete_email_via_gmail  # noqa: PLC0415
+        from app.providers.google.gmail.api import delete_email_via_gmail  # noqa: PLC0415
         return delete_email_via_gmail(
             email_id=parameters.get("email_id", ""),
             sender=parameters.get("sender"),
@@ -561,7 +567,7 @@ def _execute_write_step_action(action: str, parameters: dict, user_id: str) -> s
             user_id=user_id
         )
     elif action == "create_event":
-        from app.tools.calendar_tools import create_google_calendar_event  # noqa: PLC0415
+        from app.providers.google.calendar.api import create_google_calendar_event  # noqa: PLC0415
         return create_google_calendar_event(
             title=parameters.get("title", "Meeting"),
             date=parameters.get("date", ""),
@@ -571,7 +577,7 @@ def _execute_write_step_action(action: str, parameters: dict, user_id: str) -> s
             user_id=user_id
         )
     elif action == "reschedule_event":
-        from app.tools.calendar_tools import reschedule_google_calendar_event  # noqa: PLC0415
+        from app.providers.google.calendar.api import reschedule_google_calendar_event  # noqa: PLC0415
         return reschedule_google_calendar_event(
             event_id=parameters.get("event_id", ""),
             title=parameters.get("title", ""),
@@ -581,14 +587,14 @@ def _execute_write_step_action(action: str, parameters: dict, user_id: str) -> s
             user_id=user_id
         )
     elif action == "delete_event":
-        from app.tools.calendar_tools import delete_google_calendar_event  # noqa: PLC0415
+        from app.providers.google.calendar.api import delete_google_calendar_event  # noqa: PLC0415
         return delete_google_calendar_event(
             event_id=parameters.get("event_id", ""),
             title=parameters.get("title", ""),
             user_id=user_id
         )
     elif action == "save_contact":
-        from app.agents.memory_manager import save_contact as mem_save_contact  # noqa: PLC0415
+        from app.capabilities.memory.memory_manager import save_contact as mem_save_contact  # noqa: PLC0415
         mem_save_contact(
             user_id=user_id,
             name=parameters.get("name", ""),
@@ -599,7 +605,7 @@ def _execute_write_step_action(action: str, parameters: dict, user_id: str) -> s
         )
         return f"Remembered contact '{parameters.get('name')}'."
     elif action == "save_preference":
-        from app.agents.memory_manager import save_preference as mem_save_pref  # noqa: PLC0415
+        from app.capabilities.memory.memory_manager import save_preference as mem_save_pref  # noqa: PLC0415
         val = parameters.get("value")
         try:
             val = json.loads(val)
@@ -613,7 +619,7 @@ def _execute_write_step_action(action: str, parameters: dict, user_id: str) -> s
         )
         return f"Remembered preference '{parameters.get('category')}/{parameters.get('key')}'."
     elif action == "save_routine":
-        from app.agents.memory_manager import save_routine as mem_save_routine  # noqa: PLC0415
+        from app.capabilities.memory.memory_manager import save_routine as mem_save_routine  # noqa: PLC0415
         steps_val = parameters.get("steps", "")
         steps = steps_val if isinstance(steps_val, list) else [s.strip() for s in steps_val.split(",") if s.strip()]
         mem_save_routine(
@@ -623,7 +629,7 @@ def _execute_write_step_action(action: str, parameters: dict, user_id: str) -> s
         )
         return f"Remembered routine '{parameters.get('name')}'."
     elif action == "save_knowledge":
-        from app.agents.memory_manager import save_knowledge as mem_save_knowledge  # noqa: PLC0415
+        from app.capabilities.memory.memory_manager import save_knowledge as mem_save_knowledge  # noqa: PLC0415
         mem_save_knowledge(
             user_id=user_id,
             text=parameters.get("text", ""),
@@ -634,24 +640,24 @@ def _execute_write_step_action(action: str, parameters: dict, user_id: str) -> s
         category = parameters.get("category", "")
         key = parameters.get("key", "")
         if category == "contacts":
-            from app.agents.memory_manager import delete_contact  # noqa: PLC0415
+            from app.capabilities.memory.memory_manager import delete_contact  # noqa: PLC0415
             delete_contact(user_id, key)
         elif category == "preferences":
             parts = key.split("/")
             if len(parts) == 2:
-                from app.agents.memory_manager import delete_preference  # noqa: PLC0415
+                from app.capabilities.memory.memory_manager import delete_preference  # noqa: PLC0415
                 delete_preference(user_id, parts[0], parts[1])
         elif category == "routines":
-            from app.agents.memory_manager import delete_routine  # noqa: PLC0415
+            from app.capabilities.memory.memory_manager import delete_routine  # noqa: PLC0415
             delete_routine(user_id, key)
         elif category == "knowledge":
-            from app.agents.memory_manager import delete_knowledge  # noqa: PLC0415
+            from app.capabilities.memory.memory_manager import delete_knowledge  # noqa: PLC0415
             delete_knowledge(user_id, key)
         return f"Forgot '{key}'."
 
     elif action == "create_watcher":
-        from app.database.watcher_store import save_watcher, save_watcher_trigger, save_watcher_action  # noqa: PLC0415
-        from app.agents.watcher_builder import compile_trigger_dsl  # noqa: PLC0415
+        from app.repositories.watcher_repository import save_watcher, save_watcher_trigger, save_watcher_action  # noqa: PLC0415
+        from app.watchers.builder import compile_trigger_dsl  # noqa: PLC0415
         import uuid  # noqa: PLC0415
         watcher_id = str(uuid.uuid4())
         provider = parameters.get("provider", "gmail")
@@ -669,10 +675,18 @@ def _execute_write_step_action(action: str, parameters: dict, user_id: str) -> s
         for idx, action_type in enumerate(actions_list):
             save_watcher_action(user_id, watcher_id, action_type, {}, idx)
 
+        # Register push/webhook watch subscription
+        if provider == "gmail":
+            from app.providers.google.gmail.watch import register_gmail_watch  # noqa: PLC0415
+            register_gmail_watch(user_id)
+        elif provider == "calendar":
+            from app.providers.google.calendar.watch import register_calendar_watch  # noqa: PLC0415
+            register_calendar_watch(user_id)
+
         return f"Successfully created Watcher '{desc}' to monitor {provider}."
 
     elif action == "delete_watcher":
-        from app.database.watcher_store import delete_watcher, load_watchers  # noqa: PLC0415
+        from app.repositories.watcher_repository import delete_watcher, load_watchers  # noqa: PLC0415
         watcher_id = parameters.get("watcher_id")
         desc = parameters.get("description", "")
 
@@ -790,14 +804,14 @@ async def resume_plan(body: ResumePlanRequest) -> StreamingResponse:
 @app.get("/agent/watchers", tags=["Watchers"])
 async def get_watchers() -> list[dict]:
     """Retrieve all watchers for the active user."""
-    from app.database.watcher_store import load_watchers  # noqa: PLC0415
+    from app.repositories.watcher_repository import load_watchers  # noqa: PLC0415
     return load_watchers(settings.DEV_USER_ID)
 
 
 @app.post("/agent/watchers/{watcher_id}/toggle", tags=["Watchers"])
 async def toggle_watcher(watcher_id: str) -> dict:
     """Toggle a watcher state (enabled/disabled)."""
-    from app.database.watcher_store import load_watchers, save_watcher  # noqa: PLC0415
+    from app.repositories.watcher_repository import load_watchers, save_watcher  # noqa: PLC0415
     user_id = settings.DEV_USER_ID
     watchers = load_watchers(user_id)
     target = None
@@ -816,7 +830,7 @@ async def toggle_watcher(watcher_id: str) -> dict:
 @app.delete("/agent/watchers/{watcher_id}", tags=["Watchers"])
 async def delete_watcher_endpoint(watcher_id: str) -> dict:
     """Delete a watcher configuration."""
-    from app.database.watcher_store import delete_watcher  # noqa: PLC0415
+    from app.repositories.watcher_repository import delete_watcher  # noqa: PLC0415
     delete_watcher(settings.DEV_USER_ID, watcher_id)
     return {"status": "success", "message": "Watcher deleted."}
 
@@ -824,8 +838,242 @@ async def delete_watcher_endpoint(watcher_id: str) -> dict:
 @app.get("/agent/watchers/{watcher_id}/history", tags=["Watchers"])
 async def get_watcher_history_endpoint(watcher_id: str) -> list[dict]:
     """Retrieve execution log history for a watcher."""
-    from app.database.watcher_store import load_watcher_history  # noqa: PLC0415
+    from app.repositories.watcher_repository import load_watcher_history  # noqa: PLC0415
     return load_watcher_history(settings.DEV_USER_ID, watcher_id)
+
+
+@app.post("/webhook/google/gmail", tags=["Webhooks"])
+async def webhook_google_gmail(payload: dict = Body(...)) -> dict:
+    """Receives Gmail push notifications from Google Cloud Pub/Sub."""
+    logger.info("Received Gmail webhook event: %s", payload)
+
+    user_id = settings.DEV_USER_ID
+    from app.providers.google.gmail.event_source import GmailEventSource
+    from app.repositories.watcher_repository import load_watchers
+    from app.watchers.engine import execute_watcher_on_event
+    from app.repositories.db_client import db_load_items, db_store_item
+    from datetime import datetime, timezone
+
+    # 1. Fetch checkpoints
+    checkpoints = db_load_items("watcher_checkpoints", user_id)
+    last_checked = datetime.now(timezone.utc)
+    for c in checkpoints:
+        if c.get("provider") == "gmail":
+            last_checked = datetime.fromisoformat(c["last_checked"])
+            break
+
+    # 2. Poll new events
+    source = GmailEventSource()
+    events = source.poll_events(user_id, last_checked)
+
+    if events:
+        new_checkpoint = max(e.timestamp for e in events)
+        db_store_item("watcher_checkpoints", {
+            "user_id": user_id,
+            "provider": "gmail",
+            "last_checked": new_checkpoint.isoformat(),
+        }, ["user_id", "provider"])
+
+        watchers = load_watchers(user_id)
+        gmail_watchers = [w for w in watchers if w["enabled"] and w.get("trigger", {}).get("provider") == "gmail"]
+
+        for w in gmail_watchers:
+            for event in events:
+                execute_watcher_on_event(w, event)
+
+    return {"status": "processed"}
+
+
+@app.post("/webhook/google/calendar", tags=["Webhooks"])
+async def webhook_google_calendar(
+    payload: dict = Body(None),
+    x_goog_resource_state: str | None = Header(None, alias="X-Goog-Resource-State"),
+) -> dict:
+    """Receives primary calendar sync notifications from Google Calendar API."""
+    logger.info("Received Calendar webhook event resource-state: %s", x_goog_resource_state)
+    if x_goog_resource_state == "sync":
+        return {"status": "sync_acknowledged"}
+
+    user_id = settings.DEV_USER_ID
+    from app.providers.google.calendar.event_source import CalendarEventSource
+    from app.repositories.watcher_repository import load_watchers
+    from app.watchers.engine import execute_watcher_on_event
+    from app.repositories.db_client import db_load_items, db_store_item
+    from datetime import datetime, timezone
+
+    # 1. Fetch checkpoints
+    checkpoints = db_load_items("watcher_checkpoints", user_id)
+    last_checked = datetime.now(timezone.utc)
+    for c in checkpoints:
+        if c.get("provider") == "calendar":
+            last_checked = datetime.fromisoformat(c["last_checked"])
+            break
+
+    # 2. Poll new events
+    source = CalendarEventSource()
+    events = source.poll_events(user_id, last_checked)
+
+    if events:
+        new_checkpoint = max(e.timestamp for e in events)
+        db_store_item("watcher_checkpoints", {
+            "user_id": user_id,
+            "provider": "calendar",
+            "last_checked": new_checkpoint.isoformat(),
+        }, ["user_id", "provider"])
+
+        watchers = load_watchers(user_id)
+        cal_watchers = [w for w in watchers if w["enabled"] and w.get("trigger", {}).get("provider") == "calendar"]
+
+        for w in cal_watchers:
+            for event in events:
+                execute_watcher_on_event(w, event)
+
+    return {"status": "processed"}
+
+
+# ── Document Intelligence Endpoints ───────────────────────────────────────────
+
+_ALLOWED_MIME_TYPES = {
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/msword",
+    "text/plain",
+    "text/markdown",
+    "text/csv",
+    "application/csv",
+}
+
+
+@app.post("/agent/documents/upload", tags=["Documents"], status_code=202)
+async def upload_document(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    display_name: str | None = Form(default=None),
+    tags: str = Form(default=""),
+) -> dict:
+    """
+    Upload a document for ingestion into the RAG pipeline.
+    Returns 202 Accepted immediately; parsing + embedding run in the background.
+    Poll GET /agent/documents/{document_id} to check when status changes to 'ready'.
+    """
+    from app.capabilities.documents.ingestion import is_supported, detect_file_type  # noqa: PLC0415
+    from app.capabilities.documents.models import DocumentRecord  # noqa: PLC0415
+    from app.capabilities.documents.ingestion import run_ingestion_pipeline  # noqa: PLC0415
+    from app.repositories.document_repository import save_document_record, upload_document_file  # noqa: PLC0415
+    from pathlib import Path  # noqa: PLC0415
+
+    user_id = settings.DEV_USER_ID
+    mime_type = file.content_type or "application/octet-stream"
+    filename = file.filename or "upload"
+
+    # Validate MIME type
+    if mime_type not in _ALLOWED_MIME_TYPES:
+        from app.capabilities.documents.ingestion import SUPPORTED_EXTENSIONS  # noqa: PLC0415
+        ext = Path(filename).suffix.lower()
+        if ext not in SUPPORTED_EXTENSIONS:
+            raise HTTPException(
+                status_code=415,
+                detail=(
+                    f"Unsupported file type '{mime_type}'. "
+                    f"Supported formats: PDF, DOCX, TXT, MD, CSV."
+                ),
+            )
+
+    # Validate file size (50 MB hard limit)
+    max_bytes = settings.DOCUMENTS_MAX_FILE_SIZE_MB * 1024 * 1024 if hasattr(settings, 'DOCUMENTS_MAX_FILE_SIZE_MB') else 50 * 1024 * 1024
+    file_bytes = await file.read()
+    if len(file_bytes) > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Maximum size is {getattr(settings, 'DOCUMENTS_MAX_FILE_SIZE_MB', 50)} MB.",
+        )
+    if len(file_bytes) == 0:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    # Resolve display name
+    resolved_display_name = (display_name or Path(filename).stem).strip()
+    file_type = detect_file_type(mime_type, filename)
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+
+    # Create document record
+    import uuid as _uuid  # noqa: PLC0415
+    document_id = str(_uuid.uuid4())
+
+    # Upload raw file to storage
+    storage_path = upload_document_file(user_id, document_id, filename, file_bytes, mime_type)
+
+    record = DocumentRecord(
+        id=document_id,
+        user_id=user_id,
+        filename=filename,
+        display_name=resolved_display_name,
+        file_type=file_type,
+        mime_type=mime_type,
+        storage_path=storage_path,
+        file_size_bytes=len(file_bytes),
+        status="processing",
+        tags=tag_list,
+    )
+    save_document_record(record)
+
+    # Queue background ingestion
+    background_tasks.add_task(
+        run_ingestion_pipeline,
+        document_id=document_id,
+        user_id=user_id,
+        file_bytes=file_bytes,
+        mime_type=mime_type,
+        filename=filename,
+    )
+
+    logger.info("Document upload accepted: id=%s name=%s", document_id, resolved_display_name)
+    return {
+        "status": "processing",
+        "document_id": document_id,
+        "display_name": resolved_display_name,
+        "file_type": file_type,
+        "file_size_bytes": len(file_bytes),
+        "message": "Document uploaded successfully. Parsing and embedding are running in the background.",
+    }
+
+
+@app.get("/agent/documents", tags=["Documents"])
+async def list_documents() -> list[dict]:
+    """List all uploaded documents for the current user."""
+    from app.repositories.document_repository import load_document_records  # noqa: PLC0415
+    records = load_document_records(settings.DEV_USER_ID)
+    return [r.model_dump(exclude={"embedding"}) for r in records]
+
+
+@app.get("/agent/documents/{document_id}", tags=["Documents"])
+async def get_document(document_id: str) -> dict:
+    """Get metadata and status of a specific document."""
+    from app.repositories.document_repository import load_document_record_by_id  # noqa: PLC0415
+    record = load_document_record_by_id(settings.DEV_USER_ID, document_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"Document '{document_id}' not found.")
+    return record.model_dump(exclude={"embedding"})
+
+
+@app.delete("/agent/documents/{document_id}", tags=["Documents"])
+async def delete_document(document_id: str) -> dict:
+    """Delete a document and all its indexed chunks."""
+    from app.repositories.document_repository import (  # noqa: PLC0415
+        load_document_record_by_id,
+        delete_document_record,
+        delete_document_file,
+    )
+    record = load_document_record_by_id(settings.DEV_USER_ID, document_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"Document '{document_id}' not found.")
+
+    # Delete raw file from storage
+    delete_document_file(record.storage_path)
+    # Delete DB record + chunks (CASCADE)
+    delete_document_record(settings.DEV_USER_ID, document_id)
+
+    logger.info("Deleted document id=%s name=%s", document_id, record.display_name)
+    return {"status": "success", "message": f"Document '{record.display_name}' deleted."}
 
 
 # ── Dev entry point ───────────────────────────────────────────────────────────
