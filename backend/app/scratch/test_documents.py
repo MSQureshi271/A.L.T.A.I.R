@@ -283,11 +283,103 @@ def test_document_tools_search():
     print("✅ test_document_tools_search passed!")
 
 
+# ── Phase 2 Tests ─────────────────────────────────────────────────────────────
+
+
+def test_magic_bytes_validation():
+    from app.capabilities.documents.ingestion import validate_magic_bytes
+
+    # 1. Executable file binary header spoof check
+    exe_header = b"MZ\x90\x00\x03\x00\x00\x00"
+    try:
+        validate_magic_bytes(exe_header, "pdf")
+        assert False, "Should have rejected executable header."
+    except ValueError as exc:
+        assert "Executable binary" in str(exc)
+
+    # 2. Invalid PDF header check
+    fake_pdf = b"NOT_A_PDF_HEADER"
+    try:
+        validate_magic_bytes(fake_pdf, "pdf")
+        assert False, "Should have rejected invalid PDF header."
+    except ValueError as exc:
+        assert "Invalid PDF header" in str(exc)
+
+    # 3. Valid PDF header
+    valid_pdf = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n"
+    validate_magic_bytes(valid_pdf, "pdf")
+
+    print("✅ test_magic_bytes_validation passed!")
+
+
+def test_encrypted_pdf_detection():
+    from pypdf import PdfWriter
+    import io as _io
+
+    # Create encrypted PDF
+    writer = PdfWriter()
+    writer.add_blank_page(width=612, height=792)
+    writer.encrypt("secret_password")
+    buf = _io.BytesIO()
+    writer.write(buf)
+    encrypted_pdf_bytes = buf.getvalue()
+
+    try:
+        parse_document(encrypted_pdf_bytes, "application/pdf", "encrypted.pdf")
+        assert False, "Should have raised ValueError for encrypted PDF."
+    except ValueError as exc:
+        assert "password-protected" in str(exc) or "encrypted" in str(exc)
+
+    print("✅ test_encrypted_pdf_detection passed!")
+
+
+def test_stuck_document_recovery():
+    from app.main import recover_stuck_documents
+    from app.capabilities.documents.models import DocumentRecord
+
+    stuck_record = DocumentRecord(
+        id="stuck-1", user_id="u1", filename="stuck.pdf", display_name="Stuck Doc",
+        file_type="pdf", mime_type="application/pdf", storage_path="u1/stuck-1/stuck.pdf",
+        file_size_bytes=1000, status="processing",
+    )
+
+    with (
+        patch("app.repositories.document_repository.load_document_records", return_value=[stuck_record]),
+        patch("app.repositories.document_repository.update_document_status") as mock_update,
+    ):
+        import asyncio
+        asyncio.run(recover_stuck_documents())
+        assert mock_update.called
+        assert mock_update.call_args.kwargs.get("status") == "error"
+
+    print("✅ test_stuck_document_recovery passed!")
+
+
+def test_exponential_backoff():
+    from app.capabilities.documents.embedding import _call_with_backoff
+
+    attempts = 0
+
+    def failing_fn():
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise RuntimeError("Transient API rate limit")
+        return "SUCCESS"
+
+    with patch("time.sleep"):  # fast test without sleeping
+        result = _call_with_backoff(failing_fn, max_retries=3, initial_delay=0.01)
+
+    assert result == "SUCCESS"
+    assert attempts == 3
+    print("✅ test_exponential_backoff passed!")
+
+
 # ── Runner ─────────────────────────────────────────────────────────────────────
 
 
 if __name__ == "__main__":
-    print("\n=== Document Intelligence — Phase 1 Test Suite ===\n")
+    print("\n=== Document Intelligence — Phase 1 & 2 Test Suite ===\n")
 
     test_parse_txt()
     test_parse_pdf_bytes()
@@ -297,4 +389,11 @@ if __name__ == "__main__":
     test_document_tools_list()
     test_document_tools_search()
 
-    print("\n🎉 All Document Intelligence Phase 1 tests passed!")
+    # Phase 2
+    test_magic_bytes_validation()
+    test_encrypted_pdf_detection()
+    test_stuck_document_recovery()
+    test_exponential_backoff()
+
+    print("\n🎉 All Document Intelligence Phase 1 & 2 tests passed!")
+

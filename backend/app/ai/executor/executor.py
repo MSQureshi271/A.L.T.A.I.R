@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, Generator
 
 from app.ai.planner.planner_schema import TaskPlan, TaskStep
 from app.ai.safety.safety import SafetyRating
@@ -22,6 +22,11 @@ from app.repositories.db_client import db_store_item, db_load_items
 from app.providers.google.gmail.api import read_emails, read_email_details
 from app.providers.google.calendar.api import get_calendar_events
 from app.capabilities.search.search_tools import search_web
+from app.capabilities.documents.document_tools import (
+    search_my_documents,
+    get_document_summary,
+    list_my_documents,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +38,9 @@ _READ_DISPATCH: dict[str, callable] = {
     "read_email_details": read_email_details,
     "get_events": get_calendar_events,
     "search_web": search_web,
+    "search_my_documents": search_my_documents,
+    "get_document_summary": get_document_summary,
+    "list_my_documents": list_my_documents,
 }
 
 # Parameter key mapping: (tool, action) → how to map step.parameters to the
@@ -47,6 +55,9 @@ _PARAM_ALIASES: dict[str, dict[str, str]] = {
     "read_email_details": {"email_id": "email_id"},
     "get_events": {"days_ahead": "days_ahead"},
     "search_web": {"query": "query"},
+    "search_my_documents": {"query": "query", "document_name": "document_name"},
+    "get_document_summary": {"document_name": "document_name"},
+    "list_my_documents": {},
     "save_contact": {
         "name": "name",
         "email": "email",
@@ -230,10 +241,14 @@ def load_active_plan_record(plan_id: str) -> dict | None:
 # ── Parameter Interpolation ───────────────────────────────────────────────────
 
 def _interpolate_value(val: Any, step_outputs: dict[int, Any]) -> Any:
-    """Recursively interpolate references to previous step outputs (e.g. $step_1.email_id)."""
+    """Recursively interpolate references to previous step outputs (e.g. $step_1, $step_1.key, {{step_1_result}})."""
     if isinstance(val, str):
+        # Pre-process handlebar or suffix syntaxes like {{step_1}}, {{step_1_result}}, $step_1_result -> $step_1
+        normalized_val = re.sub(r"\{\{?\s*\$?(?:step_)?(\d+)(?:_result|\.result|\.output)?\s*\}\}?", r"$step_\1", val)
+        normalized_val = re.sub(r"\$step_(\d+)(?:_result|\.result|\.output)\b", r"$step_\1", normalized_val)
+
         # 1. Exact match case: replace the whole value with the output object (preserves non-string types)
-        exact_match = re.match(r"^\$step_(\d+)(?:\.(.+))?$", val)
+        exact_match = re.match(r"^\$step_(\d+)(?:\.(.+))?$", normalized_val)
         if exact_match:
             step_id = int(exact_match.group(1))
             key_path = exact_match.group(2)
@@ -280,7 +295,7 @@ def _interpolate_value(val: Any, step_outputs: dict[int, Any]) -> Any:
                 return ""
             return str(output_val)
 
-        return re.sub(pattern, replace_match, val)
+        return re.sub(pattern, replace_match, normalized_val)
 
     elif isinstance(val, dict):
         return {k: _interpolate_value(v, step_outputs) for k, v in val.items()}

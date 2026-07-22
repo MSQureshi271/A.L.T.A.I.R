@@ -6,7 +6,7 @@ pipeline, the repository layer, the retrieval engine, and the API endpoints.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal
 from pydantic import BaseModel, Field
 
@@ -27,10 +27,9 @@ class DocumentRecord(BaseModel):
     chunk_count: int | None = None
     error_message: str | None = None
     tags: list[str] = Field(default_factory=list)
-    embedding_model: str = ""              # e.g. "gemini/text-embedding-004" — stored for future re-embed migrations
-
-    created_at: str = ""
-    updated_at: str = ""
+    embedding_model: str = ""              # e.g. "gemini/gemini-embedding-2" — stored for future re-embed migrations
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
 class DocumentChunk(BaseModel):

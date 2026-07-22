@@ -162,4 +162,21 @@ def _execute_action(
         db_store_item("user_memory", fact, ["user_id", "key"])
         return "Fact stored in memory"
 
+    if action_type == "attach_document_summary":
+        doc_name = params.get("document_name") or params.get("document_id")
+        query = params.get("query")
+        from app.capabilities.documents.document_tools import get_document_summary, search_my_documents  # noqa: PLC0415
+
+        if doc_name:
+            doc_context = get_document_summary(doc_name)
+        elif query:
+            doc_context = search_my_documents(query)
+        else:
+            doc_context = "No document parameter specified."
+
+        title = f"Watcher Document Alert: {context.get('watcher_description', 'Rule matched')}"
+        body = f"Event: {context.get('event_type')}\n\nDocument Context:\n{doc_context[:1000]}"
+        send_watcher_notification(user_id, title, body, watcher_id)
+        return "Document summary notification sent"
+
     raise ValueError(f"Unsupported action type: {action_type}")

@@ -16,6 +16,7 @@ import json
 import logging
 import math
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +63,11 @@ def save_document_record(record: DocumentRecord) -> str:
 
     item = record.model_dump(exclude={"embedding"})  # embedding is in chunks table
     item.pop("chunk_count", None)  # computed field
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    if not item.get("created_at"):
+        item["created_at"] = now_iso
+    item["updated_at"] = now_iso
 
     if sb:
         try:
@@ -266,6 +272,32 @@ def delete_document_chunks(document_id: str) -> None:
         cache = _read_chunks_cache()
         cache.pop(document_id, None)
         _write_chunks_cache(cache)
+
+
+def load_document_chunks_by_index(user_id: str, document_id: str, max_chunks: int = 25) -> list[dict]:
+    """Retrieve chunks for a document in sequential order by chunk_index."""
+    sb = _get_supabase()
+    if sb:
+        try:
+            result = (
+                sb.table("document_chunks")
+                .select("id, document_id, chunk_index, content, page_number")
+                .eq("user_id", user_id)
+                .eq("document_id", document_id)
+                .order("chunk_index", desc=False)
+                .limit(max_chunks)
+                .execute()
+            )
+            return result.data or []
+        except Exception as exc:
+            logger.exception("load_document_chunks_by_index failed: %s", exc)
+            return []
+    else:
+        cache = _read_chunks_cache()
+        chunks = cache.get(document_id, [])
+        user_chunks = [c for c in chunks if c.get("user_id") == user_id]
+        user_chunks.sort(key=lambda c: c.get("chunk_index", 0))
+        return user_chunks[:max_chunks]
 
 
 # ── Vector & Fulltext Search ──────────────────────────────────────────────────

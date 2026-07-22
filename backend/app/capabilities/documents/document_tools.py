@@ -169,23 +169,46 @@ def get_document_summary(document_name: str) -> str:
                 f"(status: {record.status}). Please try again shortly."
             )
 
-        # Retrieve a broad cross-section of the document for summarization
-        chunks = search_documents(
-            user_id=user_id,
-            query="main topics overview key points summary conclusion",
-            document_id=record.id,
-            top_k=12,
-            min_score=0.0,  # Accept all chunks for summary purposes
-        )
-
-        if not chunks:
-            return f"The document '{record.display_name}' was processed but no content could be retrieved."
+        from app.repositories.document_repository import load_document_chunks_by_index  # noqa: PLC0415
+        from app.capabilities.documents.models import RetrievedChunk  # noqa: PLC0415
 
         doc_info = (
             f"Document: {record.display_name} ({record.file_type.upper()}, "
             f"{_format_size(record.file_size_bytes)}"
             f"{f', {record.page_count} pages' if record.page_count else ''})\n\n"
         )
+
+        # Small/Medium document: fetch sequential chunks 0..25 to preserve full chronological structure
+        if record.chunk_count is not None and record.chunk_count <= 25:
+            seq_chunks = load_document_chunks_by_index(user_id, record.id, max_chunks=25)
+            if seq_chunks:
+                retrieved_chunks = [
+                    RetrievedChunk(
+                        chunk_id=str(c.get("id", "")),
+                        document_id=record.id,
+                        document_name=record.display_name,
+                        chunk_index=c.get("chunk_index", 0),
+                        content=c.get("content", ""),
+                        page_number=c.get("page_number"),
+                        similarity_score=1.0,
+                        retrieval_method="full_document_sequence",
+                    )
+                    for c in seq_chunks
+                ]
+                return doc_info + format_chunks_for_prompt(retrieved_chunks)
+
+        # Large document: fallback to RAG cross-section retrieval
+        chunks = search_documents(
+            user_id=user_id,
+            query="main topics overview key points summary conclusion",
+            document_id=record.id,
+            top_k=15,
+            min_score=0.0,  # Accept all chunks for summary purposes
+        )
+
+        if not chunks:
+            return f"The document '{record.display_name}' was processed but no content could be retrieved."
+
         return doc_info + format_chunks_for_prompt(chunks)
 
     except Exception as exc:  # noqa: BLE001

@@ -134,7 +134,7 @@ CREATE TABLE public.document_chunks (
     content         TEXT            NOT NULL,           -- raw text of the chunk
     token_count     INTEGER         NOT NULL,
     page_number     INTEGER,
-    embedding       vector(768),                        -- Gemini text-embedding-004 output
+    embedding       vector(768),                        -- Gemini gemini-embedding-2 output
     tsv_content     TSVECTOR        GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
 
     CONSTRAINT document_chunks_pkey PRIMARY KEY (id)
@@ -157,7 +157,7 @@ CREATE INDEX idx_document_chunks_tsv         ON public.document_chunks USING GIN
 --     USING (user_id = auth.uid()::text);
 ```
 
-> **Why `vector(768)`?** Gemini's `text-embedding-004` model outputs 768-dimensional vectors by default. If you switch embedding models later (e.g. OpenAI's `text-embedding-3-large` at 3072 dims), you will need to re-embed all chunks and alter the column.
+> **Why `vector(768)`?** Gemini's `gemini-embedding-2` model outputs 768-dimensional vectors by default. If you switch embedding models later (e.g. OpenAI's `text-embedding-3-large` at 3072 dims), you will need to re-embed all chunks and alter the column.
 
 ---
 
@@ -228,7 +228,7 @@ chunk_text(full_text, chunk_size=512, overlap=64)
     └── Returns list[str] with sliding window token-aware chunking
 
 embed_chunks(chunks: list[str]) → list[list[float]]
-    └── Batched calls to Gemini text-embedding-004
+    └── Batched calls to Gemini gemini-embedding-2
         (batch size ≤ 100 per API call)
 
 upsert_chunks(document_id, user_id, chunks, embeddings)
@@ -256,7 +256,7 @@ def search_documents(
     min_score: float = 0.35,
 ) -> list[RetrievedChunk]:
     """
-    1. Embed query text using text-embedding-004.
+    1. Embed query text using gemini-embedding-2.
     2. Run pgvector cosine similarity search on document_chunks.
     3. Run PostgreSQL full-text tsvector search on same table.
     4. Merge and deduplicate by chunk id.
@@ -330,7 +330,7 @@ DOCUMENTS_MAX_FILE_SIZE_MB: int = 50
 DOCUMENTS_CHUNK_SIZE_TOKENS: int = 512
 DOCUMENTS_CHUNK_OVERLAP_TOKENS: int = 64
 DOCUMENTS_TOP_K_RETRIEVAL: int = 8
-EMBEDDING_MODEL: str = "text-embedding-004"
+EMBEDDING_MODEL: str = "gemini-embedding-2"
 ```
 
 ---
@@ -480,7 +480,7 @@ Document retrieval is a **read-only, safe** tool — it can be placed in Phase 1
 | Concern | Approach |
 |---|---|
 | pgvector index size on Supabase free tier | IVFFlat index only created after >1,000 rows (Supabase best practice). Use `probes=10` for recall/speed balance |
-| Token cost of embedding 100K-chunk corpus | Gemini `text-embedding-004` is currently free for up to 1M tokens/month. Add monitoring. |
+| Token cost of embedding 100K-chunk corpus | Gemini `gemini-embedding-2` is currently free for up to 1M tokens/month. Add monitoring. |
 | Storage cost of large PDFs | Compressed upload via `python-multipart` + Supabase Storage (S3-tier pricing). Alert user if they exceed a configurable quota (default: 500 MB) |
 
 ---
@@ -521,7 +521,7 @@ Document retrieval is a **read-only, safe** tool — it can be placed in Phase 1
 > **Q1: OCR Strategy** — `pytesseract` requires the Tesseract binary pre-installed and adds significant Docker image size (~200 MB). Do you want OCR for scanned PDFs from day one, or start with text-native PDFs only and add OCR in Phase 2?
 
 > [!IMPORTANT]
-> **Q2: Embedding Model** — Gemini `text-embedding-004` is the natural choice given the existing Gemini API key. However, if the project later moves to a multi-cloud strategy, OpenAI or Cohere embeddings may be preferable for portability. Lock this decision in before Phase 1 to avoid re-embedding costs later.
+> **Q2: Embedding Model** — Gemini `gemini-embedding-2` is the natural choice given the existing Gemini API key. However, if the project later moves to a multi-cloud strategy, OpenAI or Cohere embeddings may be preferable for portability. Lock this decision in before Phase 1 to avoid re-embedding costs later.
 
 > [!IMPORTANT]
 > **Q3: Document Quota Per User** — What is the desired maximum storage per user account? Options: 100 MB / 500 MB / 2 GB. This affects Supabase Storage costs and should be enforced at the upload endpoint.

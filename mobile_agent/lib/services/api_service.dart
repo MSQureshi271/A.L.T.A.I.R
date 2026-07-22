@@ -620,4 +620,71 @@ class ApiService {
     }
     return "✅ Action '${action.actionType}' completed successfully.";
   }
+
+  // ── Document Intelligence API ─────────────────────────────────────────────
+
+  /// Upload a document file for ingestion. Returns the new document record.
+  /// The server responds with 202 and starts background processing.
+  Future<Map<String, dynamic>> uploadDocument({
+    required String filePath,
+    required String fileName,
+    required String mimeType,
+    String? displayName,
+  }) async {
+    final uri = Uri.parse('$_backendBaseUrl/agent/documents/upload');
+    final request = http.MultipartRequest('POST', uri);
+
+    request.files.add(await http.MultipartFile.fromPath(
+      'file',
+      filePath,
+      filename: fileName,
+      contentType: MediaType.parse(mimeType),
+    ));
+
+    if (displayName != null && displayName.isNotEmpty) {
+      request.fields['display_name'] = displayName;
+    }
+
+    final streamed = await request.send().timeout(const Duration(seconds: 60));
+    final response = await http.Response.fromStream(streamed);
+
+    if (response.statusCode == 202 || response.statusCode == 200) {
+      return jsonDecode(response.body) as Map<String, dynamic>;
+    }
+    throw Exception('Upload failed (${response.statusCode}): ${response.body}');
+  }
+
+  /// Fetch the full list of uploaded documents for this user.
+  Future<List<Map<String, dynamic>>> listDocuments() async {
+    final uri = Uri.parse('$_backendBaseUrl/agent/documents');
+    final response = await http.get(uri).timeout(const Duration(seconds: 15));
+
+    if (response.statusCode == 200) {
+      final data = jsonDecode(response.body) as List<dynamic>;
+      return data.cast<Map<String, dynamic>>();
+    }
+    throw Exception('Failed to load documents (${response.statusCode})');
+  }
+
+  /// Poll a single document record by ID to check its current status.
+  Future<Map<String, dynamic>> getDocument(String documentId) async {
+    final uri = Uri.parse('$_backendBaseUrl/agent/documents/$documentId');
+    final response = await http.get(uri).timeout(const Duration(seconds: 15));
+
+    if (response.statusCode == 200) {
+      return jsonDecode(response.body) as Map<String, dynamic>;
+    }
+    throw Exception('Document not found (${response.statusCode})');
+  }
+
+  /// Delete a document and all its indexed chunks.
+  Future<void> deleteDocument(String documentId) async {
+    final uri = Uri.parse('$_backendBaseUrl/agent/documents/$documentId');
+    final response = await http.delete(uri).timeout(const Duration(seconds: 15));
+
+    if (response.statusCode != 200 && response.statusCode != 204) {
+      throw Exception('Delete failed (${response.statusCode}): ${response.body}');
+    }
+  }
 }
+

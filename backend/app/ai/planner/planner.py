@@ -102,6 +102,24 @@ Tool: search
     parameters: {{ "query": <str> }}
     requires_confirmation: false  ← read-only, always false
 
+Tool: documents
+  action: "search_my_documents"
+    parameters: {{
+      "query": <str, search query or question about document content>,
+      "document_name": <str, optional specific document name or partial name to restrict search>
+    }}
+    requires_confirmation: false  ← read-only, always false
+
+  action: "get_document_summary"
+    parameters: {{
+      "document_name": <str, name or partial name of document to summarize>
+    }}
+    requires_confirmation: false  ← read-only, always false
+
+  action: "list_my_documents"
+    parameters: {{}}
+    requires_confirmation: false  ← read-only, always false
+
 Tool: memory
   action: "save_contact"
     parameters: {{
@@ -168,7 +186,7 @@ Tool: none
 ━━━ RULES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 1. requires_confirmation MUST be true for: draft_email, delete_email, create_event, reschedule_event, delete_event, save_contact, save_preference, save_routine, save_knowledge, delete_memory, create_watcher, delete_watcher.
-2. requires_confirmation MUST be false for: read_emails, read_email_details, get_events, search_web.
+2. requires_confirmation MUST be false for: read_emails, read_email_details, get_events, search_web, search_my_documents, get_document_summary, list_my_documents.
 3. If the user's request is genuinely ambiguous (e.g. "email someone" with no
    name, or "schedule something" with no date or title), set ambiguity_question
    and return an EMPTY steps list.

@@ -16,7 +16,7 @@ class TaskStep(BaseModel):
     step_id: int = Field(
         description="Unique sequential identifier for this step, starting at 1."
     )
-    tool: Literal["gmail", "calendar", "search", "memory", "watcher", "none"] = Field(
+    tool: Literal["gmail", "calendar", "search", "documents", "memory", "watcher", "none"] = Field(
         description="Which tool/service this step uses."
     )
     action: Literal[
@@ -29,6 +29,9 @@ class TaskStep(BaseModel):
         "reschedule_event",
         "delete_event",
         "search_web",
+        "search_my_documents",
+        "get_document_summary",
+        "list_my_documents",
         "clarify",
         "save_contact",
         "save_preference",

@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS public.document_records (
     chunk_count     INTEGER,
     error_message   TEXT,
     tags            TEXT[]          NOT NULL DEFAULT '{}',
-    embedding_model TEXT            NOT NULL DEFAULT '',   -- e.g. 'gemini/text-embedding-004'
+    embedding_model TEXT            NOT NULL DEFAULT '',   -- e.g. 'gemini/gemini-embedding-2'
     created_at      TIMESTAMPTZ     NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ     NOT NULL DEFAULT now(),
 

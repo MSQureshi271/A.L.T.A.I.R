@@ -67,8 +67,8 @@ class Settings(BaseSettings):
     # Provider selection: 'gemini' | 'openai' | 'cohere' (extend embedding.py).
     EMBEDDING_PROVIDER: str = "gemini"
     # Model identifier passed to the provider SDK. Change this to switch models.
-    # Gemini default: "text-embedding-004"
-    EMBEDDING_MODEL: str = "text-embedding-004"
+    # Gemini default: "gemini-embedding-2"
+    EMBEDDING_MODEL: str = "gemini-embedding-2"
     # Output vector dimensions. Must match the Supabase vector(N) column size.
     # Changing this requires a DB migration (ALTER TABLE + full re-embed).
     EMBEDDING_DIMENSIONS: int = 768

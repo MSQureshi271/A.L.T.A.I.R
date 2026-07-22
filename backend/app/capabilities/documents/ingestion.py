@@ -53,6 +53,30 @@ def detect_file_type(mime_type: str, filename: str) -> str:
     return ext.lstrip(".") or "unknown"
 
 
+def validate_magic_bytes(file_bytes: bytes, file_type: str) -> None:
+    """Validate file content headers against dangerous binary formats and spoofing."""
+    if not file_bytes:
+        raise ValueError("File content is empty.")
+
+    header = file_bytes[:16]
+
+    # Block executable binaries regardless of declared extension
+    if header.startswith(b"MZ") or header.startswith(b"\x7fELF") or header.startswith(b"\xfe\xed\xfa") or header.startswith(b"\xcf\xfa\xed\xfe"):
+        raise ValueError("Security violation: Executable binary files are strictly prohibited.")
+
+    if file_type == "pdf":
+        if b"%PDF-" not in header[:10]:
+            raise ValueError("Security violation: Invalid PDF header. File content does not match PDF format.")
+    elif file_type == "docx":
+        if not header.startswith(b"PK\x03\x04"):
+            raise ValueError("Security violation: Invalid DOCX header. File content does not match DOCX (ZIP) format.")
+    elif file_type in ("txt", "md", "csv"):
+        # Ensure text files do not contain excessive null bytes (binary file spoofing)
+        null_count = file_bytes[:1024].count(b"\x00")
+        if null_count > 5:
+            raise ValueError("Security violation: Binary file content detected in text/CSV upload.")
+
+
 # ── Parsing ───────────────────────────────────────────────────────────────────
 
 
@@ -65,10 +89,11 @@ def parse_document(file_bytes: bytes, mime_type: str, filename: str) -> list[tup
         page_number is set for PDFs; None for all other formats.
 
     Raises:
-        ValueError  — unsupported file type or unreadable/corrupted file.
+        ValueError  — unsupported file type or unreadable/corrupted/encrypted file.
         RuntimeError — unexpected parse failure.
     """
     file_type = detect_file_type(mime_type, filename)
+    validate_magic_bytes(file_bytes, file_type)
 
     if file_type == "pdf":
         return _parse_pdf(file_bytes)
@@ -89,7 +114,18 @@ def _parse_pdf(file_bytes: bytes) -> list[tuple[str, int]]:
     """Extract text from a text-native PDF using pypdf."""
     try:
         from pypdf import PdfReader  # noqa: PLC0415
+        from pypdf.errors import FileNotDecryptedError, PyPdfError  # noqa: PLC0415
         reader = PdfReader(io.BytesIO(file_bytes))
+
+        # Check for password protection / encryption
+        if reader.is_encrypted:
+            try:
+                decrypted = reader.decrypt("")
+                if not decrypted:
+                    raise ValueError("Document is password-protected or encrypted. Please remove password protection and try again.")
+            except Exception as decrypt_exc:
+                raise ValueError("Document is password-protected or encrypted. Please remove password protection and try again.") from decrypt_exc
+
         pages: list[tuple[str, int]] = []
         for page_num, page in enumerate(reader.pages, start=1):
             text = page.extract_text() or ""
@@ -99,13 +135,15 @@ def _parse_pdf(file_bytes: bytes) -> list[tuple[str, int]]:
         if not pages:
             raise ValueError(
                 "No extractable text found in the PDF. "
-                "The document may be scanned/image-only (OCR support coming in Phase 2)."
+                "The document may be scanned/image-only (OCR support coming in future release)."
             )
         return pages
     except ImportError as exc:
         raise RuntimeError("pypdf is not installed. Run: uv add pypdf") from exc
+    except ValueError:
+        raise
     except Exception as exc:
-        if "No extractable text" in str(exc):
+        if "password-protected" in str(exc) or "encrypted" in str(exc) or "No extractable text" in str(exc):
             raise
         raise RuntimeError(f"PDF parsing failed: {exc}") from exc
 

@@ -47,16 +47,36 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Start the watcher scheduler loop
+    # Start the watcher scheduler loop & document recovery
     import asyncio
     from app.watchers.scheduler import start_scheduler_loop  # noqa: PLC0415
     task = asyncio.create_task(start_scheduler_loop())
+    asyncio.create_task(recover_stuck_documents())
     yield
     task.cancel()
     try:
         await task
     except asyncio.CancelledError:
         pass
+
+
+async def recover_stuck_documents() -> None:
+    """Scans for document records stuck in 'processing' state on server startup and marks them as error."""
+    try:
+        from app.repositories.document_repository import load_document_records, update_document_status  # noqa: PLC0415
+        user_id = settings.DEV_USER_ID
+        records = load_document_records(user_id)
+        stuck_records = [r for r in records if r.status == "processing"]
+        if stuck_records:
+            logger.info("Found %d stuck document(s) in 'processing' state on startup. Recovering...", len(stuck_records))
+            for rec in stuck_records:
+                update_document_status(
+                    document_id=rec.id,
+                    status="error",
+                    error_message="Ingestion was interrupted by a server restart. Please re-upload the document.",
+                )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Stuck document recovery failed: %s", exc)
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
