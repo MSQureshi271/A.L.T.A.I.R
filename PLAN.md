@@ -1,591 +1,325 @@
-# A.L.T.A.I.R. — Engineering Roadmap
+# A.L.T.A.I.R. — Email Attachments & Document-Attached Emails
 
-> **A** **L**ittle **T**oo **A**dvanced **I** **R**eckon
->
-> *A comprehensive development plan from our current Phase 1 baseline toward a fully autonomous, context-aware, multi-step planning assistant.*
-
----
-
-## Where We Are Today (Phase 1 Baseline)
-
-The current system has the following working components:
-
-| Layer | What Exists |
-|---|---|
-| **Flutter Frontend** | Voice input (STT), chat UI, human-in-the-loop approval drawer, auth flow, connectors page, left-side drawer |
-| **Backend** | FastAPI + SSE streaming, Gemini 2.5 Flash tool-calling loop, conversation history (in-memory, 10 turns) |
-| **Auth** | Google OAuth (Gmail + Calendar), token storage (Supabase or local cache) |
-| **Tools** | `stage_email`, `read_emails`, `send_email_via_gmail`, `get_calendar_events`, `create_calendar_event`, `search_web` |
-| **HITL** | `stage_email` → approval drawer → `/agent/execute-action` |
-
-**Current data flow:**
-```
-Voice → STT (device) → text → POST /agent/text → Gemini tool loop → SSE events → Flutter UI
-```
+> **Feature Specification & Implementation Plan**
+> 
+> Two tightly-coupled features that bridge the **Email** and **Document Library** capabilities, turning A.L.T.A.I.R. into a true personal filing system.
 
 ---
 
-## Phase 2 — Intent & Structured Planning
+## Overview
 
-> *Goal: Replace free-form Gemini function dispatch with a deterministic planner that emits structured task graphs before execution begins.*
+### Feature 1 — Email Attachment Downloader
+The user can ask the agent to download attachments from a specific email directly into the Document Library, where they are ingested, chunked, and embedded just like any manually uploaded file.
 
-### Why This Matters
+**Example prompts:**
+- *"Download the attachment from the email I got from Sarah yesterday."*
+- *"Save the PDF from the Q2 report email to my documents."*
+- *"Grab the attachments from the last email from finance@acme.com."*
 
-Currently, Gemini decides *what to do* and *how to do it* in a single, unconstrained pass. Adding a dedicated Planner:
-- Makes intent extraction testable independently of tool execution.
-- Lets us intercept and show the plan to the user before **anything** runs.
-- Creates a stable interface so that tools, memory, and safety layers can be added without touching each other.
+### Feature 2 — Send Email with Document Attachment
+The user can ask the agent to send an email with one or more files from the Document Library attached directly to the outgoing email, without needing to upload anything manually.
+
+**Example prompts:**
+- *"Email the Q2 report to usman@acme.com."*
+- *"Send the NDA document to Sarah with a brief covering note."*
+- *"Forward the project brief to the team with a summary of its key points."*
 
 ---
 
-### Task 2.1 — Define the Task Plan Schema (Backend)
+## Architecture Decisions
 
-**File:** `backend/app/agents/planner_schema.py` *(NEW)*
+### Why the Agent Must Be Prompted
+Attachment downloading is **never** triggered automatically. The watcher engine may detect `has_attachment: true` on incoming emails, but it will only notify — it will never download. This preserves user privacy and prevents storage abuse. Only an explicit user voice/text prompt causes a download.
 
-Define a Pydantic model for the structured plan that the Planner Agent will produce:
+### HITL (Human-in-the-Loop) for Attachment Sending
+Sending an email with a document attachment is a **destructive write action** (it sends data outside the system). It will always:
+1. Show a confirmation card (the `approval_required` pattern) in the Flutter UI.
+2. Display a preview of which document is being attached and to whom.
+3. Require an explicit user tap to proceed.
+
+### Storage Path for Downloaded Attachments
+Gmail returns attachment data as base64-encoded bytes directly from the API. These bytes are passed to the existing `upload_document_file()` function in `document_repository.py`, so downloaded attachments follow exactly the same storage/ingestion pipeline as manually uploaded documents.
+
+### Document Retrieval for Outbound Emails
+The Gmail `send_email_via_gmail()` function already builds a `MIMEMultipart` message. Adding attachments means fetching the raw file bytes from Supabase Storage (or local fallback) and attaching them as `MIMEBase` parts — a standard `email.mime` operation requiring no new dependencies.
+
+---
+
+## Proposed Changes
+
+---
+
+### Phase 1 — Backend: Gmail Attachment Download
+
+#### [MODIFY] gmail/api.py
+
+**Add two new functions:**
+
+1. **`list_email_attachments(email_id)`** — Read-only tool exposed to Gemini. Fetches the Gmail message, iterates over `payload.parts`, and returns a structured list of attachment metadata: `{ filename, mime_type, size_bytes, attachment_id }`. No download happens.
+
+2. **`download_email_attachment(email_id, attachment_id, filename)`** — Write-action (requires confirmation). Fetches the attachment bytes via `service.users().messages().attachments().get(...)`, then calls the document ingestion pipeline:
+   - Calls `parse_document(file_bytes, filename)` → `chunk_document()` → `embed_chunks()` → `upload_document_file()` → `save_document_record()`.
+   - Returns the new `document_id`.
+
+> **IMPORTANT:** `download_email_attachment` is a **write action** and must go through HITL (requires_confirmation = True). It triggers ingestion, which costs embedding API tokens and writes to the database/storage.
+
+#### [MODIFY] document_repository.py
+
+**Add `get_document_file_bytes(storage_path)`** — Retrieves raw file bytes from Supabase Storage (or local fallback) for a given `storage_path`. This is the inverse of `upload_document_file()` and is needed for sending document attachments in outgoing emails.
 
 ```python
-from pydantic import BaseModel
-from typing import Literal
-
-class TaskStep(BaseModel):
-    step_id: int
-    tool: Literal["gmail", "calendar", "search", "memory", "none"]
-    action: str                        # e.g. "draft_email", "create_event"
-    parameters: dict                   # raw arguments for the executor
-    requires_confirmation: bool = True # must user approve before execution?
-    depends_on: list[int] = []        # step_ids this step must wait for
-
-class TaskPlan(BaseModel):
-    intent_summary: str               # one-sentence description for the UI
-    steps: list[TaskStep]
-    ambiguity_question: str | None = None  # if the plan cannot be formed yet
+def get_document_file_bytes(storage_path: str) -> bytes:
+    """
+    Fetch raw file bytes for a document.
+    Used when attaching a document to an outgoing email.
+    """
+    sb = _get_supabase()
+    if sb:
+        response = sb.storage.from_(settings.DOCUMENTS_BUCKET).download(storage_path)
+        return response  # bytes
+    else:
+        local_path = _DOC_FILES_DIR / Path(storage_path)
+        return local_path.read_bytes()
 ```
 
 ---
 
-### Task 2.2 — Build the Planner Agent (Backend)
+### Phase 2 — Backend: Send Email with Document Attachment
 
-**File:** `backend/app/agents/planner.py` *(NEW)*
+#### [MODIFY] gmail/api.py
 
-The Planner is a **separate Gemini call** with a different system prompt and a JSON-only output mode (`response_mime_type="application/json"`, `response_schema=TaskPlan`). It does **not** call any tools — its sole job is structured reasoning.
-
-```python
-from google.genai import types
-from app.agents.planner_schema import TaskPlan
-
-PLANNER_SYSTEM_PROMPT = """
-You are the Planner for A.L.T.A.I.R., an AI productivity assistant.
-
-Your job is to read the user's voice command (possibly with conversation history
-for context) and produce a structured JSON task plan.
-
-Rules:
-- Only include steps that are genuinely needed.
-- If you need information from the user to complete the plan, set
-  ambiguity_question and return zero steps.
-- Mark requires_confirmation=true for all write/send/delete actions.
-- Mark requires_confirmation=false only for read-only lookups.
-- Infer dates relative to today's date (provided in the prompt).
-"""
-
-def plan(user_text: str, history: list[dict], today_str: str) -> TaskPlan:
-    """Return a structured TaskPlan for the user's command."""
-    client = _build_client()
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=_build_contents(user_text, history, today_str),
-        config=types.GenerateContentConfig(
-            system_instruction=PLANNER_SYSTEM_PROMPT,
-            response_mime_type="application/json",
-            response_schema=TaskPlan,
-            temperature=0.0,
-        ),
-    )
-    return TaskPlan.model_validate_json(response.text)
-```
-
----
-
-### Task 2.3 — Build the Executor (Backend)
-
-**File:** `backend/app/agents/executor.py` *(NEW)*
-
-The Executor processes a `TaskPlan`, step by step. It:
-1. Checks `requires_confirmation` — if `true`, yields an `approval_required` event and pauses.
-2. Executes tool calls for read-only steps immediately.
-3. Handles `depends_on` to ensure step ordering.
-4. Returns results to feed back into the Planner for multi-step plans.
-
-```python
-def execute_plan(plan: TaskPlan, user_id: str) -> Generator[dict, None, None]:
-    results = {}
-    for step in plan.steps:
-        # Wait for dependencies
-        for dep_id in step.depends_on:
-            if dep_id not in results:
-                yield {"type": "error", "message": f"Dependency step {dep_id} not yet complete."}
-                return
-
-        if step.requires_confirmation:
-            yield {"type": "approval_required", "action": step.action, "data": step.parameters, "step_id": step.step_id}
-            return  # pause — Flutter will resume via /agent/execute-action
-
-        result = _dispatch(step, user_id)
-        results[step.step_id] = result
-        yield {"type": "log", "message": f"✅ Step {step.step_id} complete: {step.action}"}
-
-    yield {"type": "result", "text": _summarise(results)}
-```
-
----
-
-### Task 2.4 — Wire Planner + Executor into main.py (Backend)
-
-**File:** `backend/app/main.py` *(MODIFY)*
-
-The `/agent/text` endpoint becomes a two-step SSE stream:
-
-```
-1. Call planner.plan()         → emit {"type": "plan", "plan": {...}}
-2. Call executor.execute_plan()→ emit logs, approvals, results
-```
-
-Flutter sees the plan before any action runs. This also enables us to show a preview of *what the agent is about to do* in the UI (Phase 3).
-
----
-
-### Task 2.5 — Plan Preview UI (Flutter)
-
-**File:** `mobile_agent/lib/widgets/plan_preview_card.dart` *(NEW)*
-
-When the backend emits a `plan` SSE event, display a compact card above the chat showing each step as a labelled badge (e.g. "📧 Draft email → Sarah", "📅 Create event → Thursday 4PM"). Each badge shows its `requires_confirmation` state.
-
-Update `api_service.dart` to parse the new `"plan"` SSE event type.
-
----
-
-## Phase 3 — Confirmation & Safety
-
-> *Goal: Make every destructive or externally visible action require explicit user approval, with a clear explanation of scope.*
-
-### Task 3.1 — Safety Classifier (Backend)
-
-**File:** `backend/app/agents/safety.py` *(NEW)*
-
-A lightweight classifier that runs before the Executor. It:
-- Tags each step as `safe` | `caution` | `dangerous`.
-- For `dangerous` steps (delete, bulk send, financial), generates a human-readable scope warning.
-
-```python
-DANGER_ACTIONS = {"delete_emails", "bulk_send", "cancel_recurring_event"}
-
-def classify(step: TaskStep, context: dict) -> SafetyRating:
-    """Return a safety rating and optional scope_warning string."""
-    if step.action in DANGER_ACTIONS:
-        return SafetyRating(level="dangerous", scope_warning=_compute_scope(step, context))
-    if step.requires_confirmation:
-        return SafetyRating(level="caution", scope_warning=None)
-    return SafetyRating(level="safe")
-```
-
-Example scope warning emitted to Flutter:
+**Extend `send_email_via_gmail()`** to accept an optional `attachments: list[dict] | None` parameter. Each attachment dict has the shape:
 ```json
-{"type": "safety_warning", "message": "You are about to delete 214 emails from Amazon.", "requires_double_confirm": true}
+{
+  "document_id": "uuid-...",
+  "filename": "Q2_Report.pdf",
+  "mime_type": "application/pdf",
+  "storage_path": "user-id/uuid/Q2_Report.pdf"
+}
 ```
 
----
+The function fetches bytes for each attachment using `get_document_file_bytes(storage_path)` and attaches them as `MIMEBase` parts.
 
-### Task 3.2 — Enhanced Approval Drawer (Flutter)
+**Extend `stage_email()`** (the Gemini-facing staging function) to accept `document_names: list[str] | None = None`. When document names are provided, it resolves them to document records via `load_document_by_name()` and includes attachment metadata in the `approval_required` payload so the Flutter UI can display which documents will be sent.
 
-**File:** `mobile_agent/lib/widgets/approval_drawer.dart` *(MODIFY)*
+#### [MODIFY] main.py
 
-Add a `danger` state to the drawer that:
-- Shows a red warning banner with the scope description.
-- Requires the user to type "CONFIRM" or slide a special confirmation slider for `dangerous` actions.
-- Adds an "Edit" mode for email and calendar drafts before approval.
-
----
-
-### Task 3.3 — Bulk Action Guard (Backend)
-
-**File:** `backend/app/tools/email_tools.py`, `calendar_tools.py` *(MODIFY)*
-
-Before any bulk read/delete, run a count query first and include it in the `approval_required` data. The Executor never acts on more than `N` items without confirmation.
+- **Add `/agent/execute-action` handler** for `"download_attachment"` action — calls `download_email_attachment()`, then fires the ingestion pipeline in a background task.
+- **Extend `_execute_write_step_action()`** for `"draft_email"` — passes `attachments` list from parameters to `send_email_via_gmail()`.
+- **Add `/agent/execute-action` handler** for a new `"send_email_with_attachment"` action that handles the confirmed delivery.
 
 ---
 
-## Phase 4 — Memory
+### Phase 3 — Agent Layer: Schema, Planner & Executor
 
-> *Goal: Give A.L.T.A.I.R. persistent knowledge about people, preferences, and recurring patterns, so users never have to repeat themselves.*
+#### [MODIFY] planner_schema.py
 
-### Task 4.1 — Design the Memory Schema (Database)
+Add new actions to the `Literal` type definition:
 
-**Supabase table:** `user_memory`
-
-```sql
-CREATE TABLE user_memory (
-    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-    user_id UUID NOT NULL,
-    key TEXT NOT NULL,                    -- e.g. "accountant", "weekly_review"
-    value JSONB NOT NULL,                 -- e.g. {"email": "bob@firm.com", "name": "Bob"}
-    memory_type TEXT NOT NULL,            -- "contact", "preference", "routine"
-    created_at TIMESTAMP DEFAULT now(),
-    updated_at TIMESTAMP DEFAULT now(),
-    UNIQUE(user_id, key)
-);
+```diff
+action: Literal[
+    "read_emails",
+    "draft_email",
++   "list_email_attachments",
++   "download_email_attachment",
++   "draft_email_with_attachment",
+    "delete_email",
+    ...
+]
 ```
 
----
-
-### Task 4.2 — Memory Manager (Backend)
-
-**File:** `backend/app/agents/memory_manager.py` *(NEW)*
-
-Provides:
-- `lookup(user_id, query)` — fuzzy/semantic search over memory keys.
-- `store(user_id, key, value, type)` — write or update a memory fact.
-- `delete(user_id, key)` — remove a memory entry.
-
-Uses **pgvector** (a Supabase/Postgres extension) to enable semantic similarity search on memory keys and values. This allows matching "my accountant" to stored entry `{"key": "accountant", "value": {"email": "bob@firm.com"}}`.
-
----
-
-### Task 4.3 — Memory Tool (Backend)
-
-**File:** `backend/app/tools/memory_tools.py` *(NEW)*
-
-Expose two Gemini tools:
-- `lookup_memory(query: str)` — look up a contact, preference, or routine.
-- `save_memory(key: str, value: dict, memory_type: str)` — proactively store something the user told the assistant.
-
-These tools are always available to both the Planner and the Executor.
-
----
-
-### Task 4.4 — Memory Resolver in Planner (Backend)
-
-**File:** `backend/app/agents/planner.py` *(MODIFY)*
-
-Before the Planner generates a plan, run a **pre-pass** memory lookup:
-
-```python
-# Before calling Gemini planner, resolve obvious references
-resolved_context = await memory_manager.resolve_references(user_text, user_id)
-# e.g. "my accountant" → {"email": "bob@cpa.com", "name": "Bob Smith"}
-# Inject resolved_context into the planner prompt
-```
-
-This means the Planner always receives enriched context — it never generates an `ambiguity_question` for something the user has already taught the assistant.
-
----
-
-### Task 4.5 — Memory UI (Flutter)
-
-**File:** `mobile_agent/lib/views/memory_view.dart` *(NEW)*
-
-A dedicated page (accessible from the left sidebar) showing:
-- Stored contacts with their resolved information.
-- Saved preferences and routines.
-- A way to delete individual memory entries.
-
-When the agent stores a new memory fact mid-conversation, a subtle "Remembered: your accountant is Bob" toast appears.
-
----
-
-## Phase 5 — Multi-Step Workflows
-
-> *Goal: A single user command can trigger a sequence of coordinated actions across multiple tools.*
-
-### Task 5.1 — Task Graph Engine (Backend)
-
-**File:** `backend/app/agents/task_graph.py` *(NEW)*
-
-Currently, `TaskPlan.steps` is a linear list. Upgrade it to a **directed acyclic graph (DAG)**:
-
-```python
-class TaskGraph(BaseModel):
-    nodes: dict[int, TaskStep]
-    edges: list[tuple[int, int]]  # (from_step_id, to_step_id)
-```
-
-The Executor walks the graph topologically:
-1. Execute all nodes with no unresolved dependencies in parallel (using `asyncio.gather`).
-2. Pass results downstream to dependent nodes.
-3. Pause the graph at any `requires_confirmation` node.
-4. Resume the graph via `/agent/resume-plan/{plan_id}`.
-
----
-
-### Task 5.2 — Plan Persistence (Backend)
-
-**File:** `backend/app/database/plan_store.py` *(NEW)*
-
-**Supabase table:** `active_plans`
-
-```sql
-CREATE TABLE active_plans (
-    plan_id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-    user_id UUID NOT NULL,
-    status TEXT NOT NULL,             -- "pending", "awaiting_approval", "completed", "failed"
-    plan_json JSONB NOT NULL,         -- full TaskPlan model representation
-    user_text TEXT,                   -- original natural language command
-    history JSONB DEFAULT '[]'::jsonb,-- conversation history
-    created_at TIMESTAMP DEFAULT now(),
-    updated_at TIMESTAMP DEFAULT now()
-);
-```
-
-When the user approves an action, Flutter sends `plan_id` + `step_id` to `/agent/resume-plan`, and the Executor picks up where it left off.
-
----
-
-### Task 5.3 — Multi-Step UI Progress (Flutter)
-
-**File:** `mobile_agent/lib/widgets/workflow_progress_card.dart` *(NEW)*
-
-A horizontal stepper widget that appears in the chat when a multi-step plan is active:
-- Each step shows its icon, label, and status (pending / running / ✅ done / ❌ failed).
-- The active step pulses with a subtle glow animation.
-- Approval steps show a "Review & Approve" button inline.
-
----
-
-### Task 5.4 — Parallel Step Execution (Backend)
-
-**File:** `backend/app/agents/executor.py` *(MODIFY)*
-
-Convert the executor to `async` and use `asyncio.gather` to run independent steps concurrently. For example, "block my calendar AND draft an out-of-office email" can be executed in parallel since neither step depends on the other.
-
----
-
-## Phase 6 — Context Awareness
-
-> *Goal: Enable pronoun and reference resolution so the user can say "tell her I'll be late" and the assistant knows who "her" is.*
-
-### Task 6.1 — Context Window (Backend)
-
-**File:** `backend/app/agents/context_resolver.py` *(NEW)*
-
-Maintain a **session context object** alongside conversation history:
-
-```python
-class SessionContext(BaseModel):
-    last_mentioned_people: list[dict]   # [{"name": "Sarah", "email": "sarah@..."}]
-    upcoming_events: list[dict]          # next 3 calendar events, refreshed each turn
-    last_action: dict | None             # what was just done
-    active_plan_id: str | None           # if a multi-step workflow is in progress
-```
-
-This object is:
-1. Built at the start of every `/agent/text` request.
-2. Injected into the Planner's system prompt as structured context.
-3. Updated after each turn and serialised back to the conversation history.
-
----
-
-### Task 6.2 — Pronoun Resolution in Planner (Backend)
-
-**File:** `backend/app/agents/planner.py` *(MODIFY)*
-
-Inject `SessionContext` into the planner prompt:
-
-```
-CONTEXT:
-- Your last mentioned person: Sarah (sarah@acme.com)
-- Your next meeting: "Acme Review" with Sarah at 3:00 PM today
-- Last action taken: drafted an email to John
-```
-
-Gemini's Planner now has enough grounding to resolve "her" → Sarah, "it" → Acme Review, etc.
-
----
-
-### Task 6.3 — Upcoming Event Prefetch (Backend)
-
-**File:** `backend/app/tools/calendar_tools.py` *(MODIFY)*
-
-Add a lightweight `prefetch_upcoming_events(user_id, limit=3)` function that fetches the next 3 calendar events silently at the start of each session. This populates `SessionContext.upcoming_events` without being a visible tool call.
-
----
-
-## Phase 7 — Background Jobs
-
-> *Goal: A.L.T.A.I.R. can monitor conditions and proactively alert the user, without requiring a voice command.*
-
-### Task 7.1 — Background Job Schema (Database)
-
-**Supabase table:** `background_jobs`
-
-```sql
-CREATE TABLE background_jobs (
-    job_id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-    user_id UUID NOT NULL,
-    description TEXT NOT NULL,            -- human-readable, shown in UI
-    trigger_type TEXT NOT NULL,           -- "email_keyword", "calendar_change", "schedule"
-    trigger_config JSONB NOT NULL,        -- e.g. {"keywords": ["pricing"], "sender": "Acme"}
-    action_on_trigger JSONB NOT NULL,     -- what to do when triggered
-    status TEXT DEFAULT 'active',         -- "active", "paused", "triggered", "expired"
-    last_checked TIMESTAMP,
-    expires_at TIMESTAMP
-);
-```
-
----
-
-### Task 7.2 — Background Job Runner (Backend)
-
-**File:** `backend/app/jobs/job_runner.py` *(NEW)*
-
-A long-running `asyncio` task started with FastAPI's `lifespan` hook:
-
-```python
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    task = asyncio.create_task(job_runner.run_all())
-    yield
-    task.cancel()
-```
-
-The runner:
-1. Polls active jobs on a configurable interval (default: every 5 minutes).
-2. For each `email_keyword` job: calls Gmail API, scans recent messages for keyword matches.
-3. When triggered: sends a push notification to the user's device.
-4. Updates `last_checked` and optionally `status = "triggered"`.
-
----
-
-### Task 7.3 — Push Notifications (Flutter + Backend)
-
-**Technology:** Firebase Cloud Messaging (FCM)
-
-**Backend:**
-- Add `firebase-admin` to `requirements.txt`.
-- Store FCM device token per user in `user_memory` (or a dedicated `device_tokens` table).
-- `job_runner.py` calls `firebase_admin.messaging.send()` when a job triggers.
-
-**Flutter:**
-- Add `firebase_messaging` package to `pubspec.yaml`.
-- Register device token on login and send it to the backend.
-- Show a notification tray card when a background job fires.
-
----
-
-### Task 7.4 — Background Jobs UI (Flutter)
-
-**File:** `mobile_agent/lib/views/background_jobs_view.dart` *(NEW)*
-
-Accessible from the left sidebar. Displays:
-- Active monitoring jobs with their conditions.
-- A toggle to pause/resume each job.
-- History of past triggers.
-
-Creating a job is as simple as saying:
-> "Monitor emails from Acme Corp and alert me if they mention pricing."
-
-The Planner interprets this as a `create_background_job` intent and calls the appropriate tool.
-
----
-
-## Technical Stack Additions
-
-| What | Technology | Why |
+| Action | Tool | requires_confirmation |
 |---|---|---|
-| Structured Planner output | Gemini `response_schema` + Pydantic | Deterministic JSON output, no regex parsing |
-| Semantic memory search | Supabase `pgvector` extension | Fuzzy match "my accountant" without exact key lookup |
-| Plan persistence | Supabase `active_plans` table | Resume multi-step workflows after approval or restart |
-| Background jobs | FastAPI `lifespan` + `asyncio` | Non-blocking, scales with the existing backend |
-| Push notifications | Firebase Cloud Messaging (FCM) | Cross-platform, no polling from device |
-| Parallel step execution | `asyncio.gather` in Executor | Independent steps in a workflow run concurrently |
+| `list_email_attachments` | `gmail` | `false` |
+| `download_email_attachment` | `gmail` | `true` |
+| `draft_email_with_attachment` | `gmail` | `true` |
+
+#### [MODIFY] planner.py
+
+Update `_PLANNER_SYSTEM_PROMPT` with:
+- **New tool descriptions** for the three new actions under the `gmail` tool domain.
+- **New DAG examples** showing multi-step patterns, e.g.:
+  - *"Download the PDF from Sarah's email"* → Step 1: `read_emails` (find ID) → Step 2: `list_email_attachments` → Step 3: `download_email_attachment`.
+  - *"Email the Q2 report to usman@acme.com"* → Step 1: `get_document_summary` (confirm doc exists) → Step 2: `draft_email_with_attachment`.
+- **Planner rule** that `download_email_attachment` requires confirmation.
+- **Planner rule** that `draft_email_with_attachment` requires confirmation.
+
+#### [MODIFY] executor.py
+
+- **`_READ_DISPATCH`**: Add `list_email_attachments`.
+- **`_PARAM_ALIASES`**: Add parameter mappings for all three new actions.
+- **`_WRITE_APPROVAL_MAP`**: Add `download_email_attachment` and `draft_email_with_attachment` mappings with their approval data shapes.
+
+#### [MODIFY] safety.py
+
+- Classify `download_email_attachment` as a write that **always requires confirmation** (medium risk — modifies document library).
+- Classify `draft_email_with_attachment` as a write that **always requires confirmation** (high risk — sends external data).
+- Do **not** add either to any auto-approve whitelist.
 
 ---
 
-## Implementation Order
+### Phase 4 — Flutter UI
 
-The phases are designed to be built in strict order — each one is a foundation for the next.
+#### [MODIFY] api_service.dart
+
+Add API methods:
+- `listEmailAttachments(String emailId)` → `GET /email/{email_id}/attachments`
+- `downloadEmailAttachment(String emailId, String attachmentId, String filename)` → `POST /agent/execute-action` with `action: "download_attachment"`.
+
+#### [NEW] approval_card_attachment.dart
+A specialized HITL approval card widget shown when the agent stages a `download_email_attachment` action. Shows:
+- 📎 Attachment filename and size.
+- Source email sender + subject.
+- **"Save to Documents"** and **"Cancel"** buttons.
+- A loading shimmer while ingestion runs in the background after confirmation.
+
+#### [MODIFY] voice_home_view.dart
+Extend the existing approval card rendering logic (in `_buildApprovalCard()`) to handle two new action types:
+- `download_attachment` → Render the new `ApprovalCardAttachment`.
+- `send_email_with_attachment` → Extend the existing email approval card to show attached document pill badges (filename, file type icon) above the email body preview.
+
+#### [MODIFY] documents_view.dart
+When a document was originally sourced from a Gmail attachment (`source_type: "email_attachment"`), show a small **📧 From Email** badge on the document card — mirroring how documents know their source.
+
+> **NOTE:** This badge is cosmetic only and requires adding a `source_type` field to the `DocumentRecord` model (backend `models.py`) and the Flutter `document.dart` model.
+
+---
+
+## Data Flow Diagrams
+
+### Feature 1: Attachment Download Flow
 
 ```
-Phase 2: Planner/Executor architecture
-   │
-   ├── 2.1  TaskStep / TaskPlan schema
-   ├── 2.2  Planner agent (Gemini JSON mode)
-   ├── 2.3  Executor (step dispatcher)
-   ├── 2.4  Wire into /agent/text endpoint
-   └── 2.5  Plan preview UI in Flutter
+User prompt: "Download PDF from Sarah's email"
+       |
+       v
+[Planner] → DAG:
+  Step 1 (read):     read_emails         → find email ID
+  Step 2 (read):     list_email_attachments → confirm attachment_id, filename, size
+  Step 3 (approval): download_email_attachment
+       |
+       v
+[Flutter] shows confirmation card → User taps "Save to Documents"
+       |
+       v
+[execute-action: download_attachment]
+  1. Gmail API: attachments.get(email_id, attachment_id) → base64 bytes
+  2. Document Engine: parse → chunk → embed
+  3. Storage: upload_document_file()
+  4. DB: save_document_record(source_type="email_attachment")
+       |
+       v
+Document Library updates: 📄 Q2_Report.pdf — Ready
+```
 
-Phase 3: Safety layer
-   │
-   ├── 3.1  Safety classifier
-   ├── 3.2  Enhanced approval drawer
-   └── 3.3  Bulk action guard
+### Feature 2: Send Email with Document Attachment Flow
 
-Phase 4: Memory
-   │
-   ├── 4.1  Supabase user_memory table
-   ├── 4.2  Memory manager (pgvector lookups)
-   ├── 4.3  lookup_memory / save_memory tools
-   ├── 4.4  Memory pre-pass in Planner
-   └── 4.5  Memory UI in Flutter
-
-Phase 5: Multi-step workflows
-   │
-   ├── 5.1  Task graph (DAG) engine
-   ├── 5.2  Plan persistence (Supabase)
-   ├── 5.3  Workflow progress UI
-   └── 5.4  Parallel step execution
-
-Phase 6: Context awareness
-   │
-   ├── 6.1  SessionContext object
-   ├── 6.2  Pronoun resolution in Planner
-   └── 6.3  Upcoming event prefetch
-
-Phase 7: Background jobs
-   │
-   ├── 7.1  background_jobs table
-   ├── 7.2  Job runner (asyncio + lifespan)
-   ├── 7.3  FCM push notifications
-   └── 7.4  Background jobs UI
+```
+User prompt: "Email Q2 report to usman@acme.com"
+       |
+       v
+[Planner] → DAG:
+  Step 1 (read):     get_document_summary("Q2 report") → confirm doc exists
+  Step 2 (approval): draft_email_with_attachment
+       |
+       v
+[Executor: Step 1]
+  load_document_by_name("Q2 report") → DocumentRecord {storage_path, filename, mime_type}
+       |
+       v
+[Executor: Step 2 → approval_required payload]
+  {
+    type: "approval_required",
+    action: "send_email_with_attachment",
+    data: {
+      to: "usman@acme.com",
+      subject: "Q2 Financial Report",
+      body: "Hi Usman, please find the Q2 report attached.",
+      attachments: [{ document_id, filename, storage_path, mime_type }]
+    }
+  }
+       |
+       v
+[Flutter] shows email card with 📎 Q2_Report.pdf pill → User taps "Send"
+       |
+       v
+[execute-action: send_email_with_attachment]
+  1. get_document_file_bytes(storage_path) → raw bytes
+  2. MIMEMultipart → MIMEBase attachment
+  3. Gmail API: messages.send()
+       |
+       v
+"✅ Email sent to usman@acme.com with attachment: Q2_Report.pdf"
 ```
 
 ---
 
-## What We Deliberately Will Not Build (Yet)
+## New Backend Endpoints
 
-The following integrations are explicitly deferred until the core architecture (Phases 2–6) is solid:
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/email/{email_id}/attachments` | List attachment metadata for a Gmail message |
 
-- Slack, WhatsApp, Discord, LinkedIn
-- Trello, Notion, Dropbox
-- Salesforce
-- Microsoft Graph (Outlook / Exchange)
-
-Adding integrations before the planning layer exists means each new tool makes the system fragile. After Phase 5, adding a tool is a matter of:
-1. Writing one Python tool file.
-2. Adding one `ConnectorConfig` entry to the Flutter registry.
-3. Adding one action key to the Executor dispatch table.
-
-That is the architectural payoff we are building toward.
+The `POST /agent/execute-action` endpoint is **extended** (no new route) to handle:
+- `"download_attachment"` — fetches, validates, ingests Gmail attachment bytes.
+- `"send_email_with_attachment"` — fetches document bytes, builds MIME message, sends via Gmail.
 
 ---
 
-## Suggested Two-Week Sprint
+## Schema Changes
 
-**Week 1: Phase 2 (Planner + Executor)**
+### Backend — `models.py` (DocumentRecord)
+```diff
++ source_type: str = "upload"        # "upload" | "email_attachment"
++ source_email_id: str | None = None # Gmail message ID if sourced from email
+```
 
-| Day | Task |
+### Backend — `migrations.sql` (Supabase)
+```sql
+ALTER TABLE document_records ADD COLUMN source_type TEXT DEFAULT 'upload';
+ALTER TABLE document_records ADD COLUMN source_email_id TEXT;
+```
+
+### Flutter — `document.dart`
+```diff
++ final String sourceType;
++ final String? sourceEmailId;
++ bool get isFromEmail => sourceType == 'email_attachment';
+```
+
+---
+
+## Safety & Privacy Rules
+
+| Rule | Enforcement |
 |---|---|
-| 1 | Define `TaskStep` / `TaskPlan` Pydantic schema + unit tests |
-| 2 | Build `planner.py` — Gemini JSON mode, prompt engineering |
-| 3 | Build `executor.py` — linear step dispatch, approval intercept |
-| 4 | Wire into `main.py` — new SSE event `"plan"`, refactor `/agent/text` |
-| 5 | Flutter: parse `"plan"` event, build `PlanPreviewCard` widget |
+| Attachment download is never automatic | Watcher engine cannot call `download_email_attachment`. Only the executor, after explicit user approval, can. |
+| File size limit enforced pre-download | `list_email_attachments` returns `size_bytes`. If a file exceeds `settings.MAX_UPLOAD_BYTES`, the executor rejects before downloading. |
+| Supported MIME types only | Attachment ingestion passes through the same magic byte + MIME validation as manual uploads. Executables, encrypted PDFs, and unsupported formats are rejected with clean error messages. |
+| Email with attachment always requires confirmation | `draft_email_with_attachment` is classified as high-risk in `safety.py`. Never auto-approved. |
+| No document data leaked without approval | The staging step resolves document metadata (filename, size) without reading file bytes. Bytes are fetched only after explicit user confirmation. |
 
-**Week 2: Phase 3 (Safety) + Phase 4 start (Memory schema)**
+---
 
-| Day | Task |
-|---|---|
-| 6 | `safety.py` — classifier + scope warning |
-| 7 | Flutter: danger-state approval drawer + double-confirm slider |
-| 8 | Supabase: create `user_memory` table, enable pgvector |
-| 9 | `memory_manager.py` + `memory_tools.py` + register with Planner |
-| 10 | Flutter: memory UI (list + delete), memory toast notification |
+## Implementation Phases & Effort Estimate
+
+| Phase | Scope | Key Files |
+|---|---|---|
+| **Phase 1** | Gmail attachment download backend | `gmail/api.py`, `document_repository.py`, `main.py`, `models.py`, `migrations.sql` |
+| **Phase 2** | Send email with document attachment backend | `gmail/api.py`, `document_repository.py`, `main.py` |
+| **Phase 3** | Agent layer (schema, planner, executor, safety) | `planner_schema.py`, `planner.py`, `executor.py`, `safety.py` |
+| **Phase 4** | Flutter UI (approval cards, document badges) | `api_service.dart`, `voice_home_view.dart`, `documents_view.dart`, new `approval_card_attachment.dart` |
+
+---
+
+## Open Questions
+
+> **Q1: Multi-attachment handling** — When an email has multiple attachments (e.g., 3 PDFs), should the agent download all of them in one step, or present each one for individual confirmation?
+> *Recommended: batch confirmation — show all attachments in one card with individual checkboxes so the user can deselect any before saving.*
+
+> **Q2: Attachment size cap** — What is the maximum file size for attachment ingestion? The existing manual upload limit is defined by `settings.MAX_UPLOAD_BYTES`. Should the same limit apply, or should email attachments have a separate, lower cap?
+
+> **Q3: Document-to-email resolution** — When the user says *"email the Q2 report,"* should the agent use fuzzy-name matching (as `load_document_by_name()` currently does), or present a disambiguation card if multiple documents match?
+> *Recommended: use existing fuzzy match for a single result; trigger a `clarify` step if 2+ documents match.*
+
+> **Q4: Source badge visibility** — The `📧 From Email` source badge on document cards requires a DB migration (`ALTER TABLE`). Should this be included in the first implementation pass, or deferred?

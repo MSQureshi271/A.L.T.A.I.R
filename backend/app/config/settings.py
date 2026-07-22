@@ -73,6 +73,27 @@ class Settings(BaseSettings):
     # Changing this requires a DB migration (ALTER TABLE + full re-embed).
     EMBEDDING_DIMENSIONS: int = 768
 
+    # ── Upload Quotas (Tiered Architecture) ───────────────────────────────────
+    # USER_TIER controls which limit is enforced at upload / attachment ingestion time.
+    # Values: 'basic' | 'medium' | 'premium'
+    # Set USER_TIER in .env to upgrade a user (Milestone 4: this will come from Supabase Auth).
+    USER_TIER: str = "premium"            # default: no cap during development
+    UPLOAD_QUOTA_MB_BASIC: int = 10       # 10 MB per file — Basic tier
+    UPLOAD_QUOTA_MB_MEDIUM: int = 50      # 50 MB per file — Medium tier
+    UPLOAD_QUOTA_MB_PREMIUM: int = 0      # 0 = unlimited — Premium tier
+
+    @property
+    def upload_limit_bytes(self) -> int:
+        """Returns the per-file upload byte limit based on USER_TIER.
+        Returns 0 for premium (no limit).
+        """
+        tier = self.USER_TIER.lower()
+        if tier == "basic":
+            return self.UPLOAD_QUOTA_MB_BASIC * 1024 * 1024
+        if tier == "medium":
+            return self.UPLOAD_QUOTA_MB_MEDIUM * 1024 * 1024
+        return 0  # premium / unknown — no cap
+
     # ── Development ───────────────────────────────────────────────────────────
     # Hardcoded dev user UUID used until Supabase Auth is implemented in M4.
     # All tool calls and token lookups use this ID for now.

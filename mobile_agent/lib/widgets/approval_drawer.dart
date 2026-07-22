@@ -211,6 +211,56 @@ const List<ActionSchema> _kActionSchemas = [
   //                 type: FieldType.multiLine),
   //   ],
   // ),
+
+  // ── Email + Document Attachment Schemas ───────────────────────────────────
+
+  ActionSchema(
+    actionType: 'send_email_with_attachment',
+    displayName: 'Email with Document',
+    confirmLabel: 'Approve & Send with Attachment',
+    headerIcon: Icons.attach_email_rounded,
+    accentColor: Color(0xFF3D8EFF),
+    fields: [
+      ActionField(
+        key: 'to',
+        label: 'Recipient (To)',
+        icon: Icons.alternate_email_rounded,
+      ),
+      ActionField(
+        key: 'subject',
+        label: 'Subject',
+        icon: Icons.title_rounded,
+      ),
+      ActionField(
+        key: 'body',
+        label: 'Email Body',
+        icon: Icons.article_rounded,
+        type: FieldType.multiLine,
+      ),
+      ActionField(
+        key: 'attachments',
+        label: 'Attached Documents',
+        icon: Icons.attach_file_rounded,
+        type: FieldType.readOnly,
+      ),
+    ],
+  ),
+
+  ActionSchema(
+    actionType: 'download_attachment',
+    displayName: 'Save Email Attachments',
+    confirmLabel: 'Save Selected to Documents',
+    headerIcon: Icons.download_rounded,
+    accentColor: Color(0xFF00B4D8),
+    fields: [
+      ActionField(
+        key: 'email_id',
+        label: 'Source Email ID',
+        icon: Icons.email_rounded,
+        type: FieldType.readOnly,
+      ),
+    ],
+  ),
 ];
 
 ActionSchema _schemaFor(String actionType) {
@@ -258,10 +308,20 @@ class _ApprovalDrawerState extends State<ApprovalDrawer> {
     };
   }
 
-  /// Safely converts any data value to a display string (handles lists, etc.)
+  /// Safely converts any data value to a display string (handles lists of maps, etc.)
   String _stringValue(dynamic value) {
     if (value == null) return '';
-    if (value is List) return value.join(', ');
+    if (value is List) {
+      if (value.isNotEmpty && value.first is Map) {
+        return value.map((e) {
+          if (e is Map) {
+            return e['display_name'] ?? e['filename'] ?? e.toString();
+          }
+          return e.toString();
+        }).join(', ');
+      }
+      return value.join(', ');
+    }
     return value.toString();
   }
 
@@ -277,8 +337,13 @@ class _ApprovalDrawerState extends State<ApprovalDrawer> {
     // Reconstruct data map from controllers; preserve original types where possible
     final updated = Map<String, dynamic>.from(widget.action.data);
     for (final field in _schema.fields) {
-      final text = _controllers[field.key]?.text ?? '';
       final original = widget.action.data[field.key];
+      if (field.type == FieldType.readOnly) {
+        // Preserve original complex objects (e.g. List<Map> attachments) for read-only fields
+        updated[field.key] = original;
+        continue;
+      }
+      final text = _controllers[field.key]?.text ?? '';
       if (original is List) {
         // Re-split comma-separated values back into a list
         updated[field.key] =

@@ -57,6 +57,31 @@ Tool: gmail
     parameters: {{ "recipient": <email address or name>, "subject": <str>, "body": <str> }}
     requires_confirmation: true   ← write action, always true
 
+  action: "list_email_attachments"
+    parameters: {{ "email_id": <str, unique Gmail message ID from read_emails> }}
+    requires_confirmation: false  ← read-only, no bytes downloaded
+    (Use BEFORE download_email_attachment to inspect what attachments are available.)
+
+  action: "download_email_attachment"
+    parameters: {{
+      "email_id": <str, Gmail message ID>,
+      "attachments": [
+        {{ "attachment_id": <str>, "filename": <str>, "mime_type": <str>, "email_id": <str>, "selected": true }}
+      ]
+    }}
+    requires_confirmation: true   ← write action (saves to Document Library), always true
+    (Show all attachments in a batch card. User can deselect any before saving.)
+
+  action: "draft_email_with_attachment"
+    parameters: {{
+      "recipient": <email address or name>,
+      "subject": <str>,
+      "body": <str>,
+      "document_names": [<str, name(s) of document(s) from the Document Library to attach>]
+    }}
+    requires_confirmation: true   ← write action, always true
+    (Resolves document names via fuzzy match. If 2+ documents match, returns clarify step.)
+
   action: "delete_email"
     parameters: {{
       "email_id": <str, unique ID of the email to delete>,
@@ -185,8 +210,8 @@ Tool: none
 
 ━━━ RULES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-1. requires_confirmation MUST be true for: draft_email, delete_email, create_event, reschedule_event, delete_event, save_contact, save_preference, save_routine, save_knowledge, delete_memory, create_watcher, delete_watcher.
-2. requires_confirmation MUST be false for: read_emails, read_email_details, get_events, search_web, search_my_documents, get_document_summary, list_my_documents.
+1. requires_confirmation MUST be true for: draft_email, draft_email_with_attachment, download_email_attachment, delete_email, create_event, reschedule_event, delete_event, save_contact, save_preference, save_routine, save_knowledge, delete_memory, create_watcher, delete_watcher.
+2. requires_confirmation MUST be false for: read_emails, read_email_details, list_email_attachments, get_events, search_web, search_my_documents, get_document_summary, list_my_documents.
 3. If the user's request is genuinely ambiguous (e.g. "email someone" with no
    name, or "schedule something" with no date or title), set ambiguity_question
    and return an EMPTY steps list.
@@ -196,6 +221,7 @@ Tool: none
 7. Use at most 5 steps per plan.
 8. If the conversation history shows that the user previously read emails or
    events, you may reference that context when retrieving details or replying.
+9. When the user asks to email a document: use draft_email_with_attachment with document_names list. If 2+ documents match the name, return a clarify step asking the user which one they mean.
 
 ━━━ EXAMPLES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -309,6 +335,38 @@ User: "Send an email."
 → intent_summary: "Draft an email (recipient and content unknown)."
 → steps: []
 → ambiguity_question: "Who should I send the email to, and what would you like it to say?"
+
+User: "Download the attachment from Sarah's email."
+→ intent_summary: "Find Sarah's email, list its attachments, and save them to the Document Library."
+→ steps: [
+    {{ "step_id": 1, "tool": "gmail", "action": "read_emails",
+       "parameters": {{ "max_results": 3, "sender": "Sarah" }},
+       "requires_confirmation": false, "depends_on": [],
+       "description": "Find Sarah's latest email." }},
+    {{ "step_id": 2, "tool": "gmail", "action": "list_email_attachments",
+       "parameters": {{ "email_id": "" }},
+       "requires_confirmation": false, "depends_on": [1],
+       "description": "List attachments on Sarah's email." }},
+    {{ "step_id": 3, "tool": "gmail", "action": "download_email_attachment",
+       "parameters": {{ "email_id": "", "attachments": [] }},
+       "requires_confirmation": true, "depends_on": [2],
+       "description": "Save selected attachments to Document Library." }}
+  ]
+
+User: "Email the Q2 report to usman@acme.com with a brief note."
+→ intent_summary: "Attach Q2 report document and send to usman@acme.com."
+→ steps: [
+    {{ "step_id": 1, "tool": "documents", "action": "get_document_summary",
+       "parameters": {{ "document_name": "Q2 report" }},
+       "requires_confirmation": false, "depends_on": [],
+       "description": "Confirm Q2 report document exists." }},
+    {{ "step_id": 2, "tool": "gmail", "action": "draft_email_with_attachment",
+       "parameters": {{ "recipient": "usman@acme.com", "subject": "Q2 Report",
+                     "body": "Hi Usman, please find the Q2 report attached.",
+                     "document_names": ["Q2 report"] }},
+       "requires_confirmation": true, "depends_on": [1],
+       "description": "Draft email with Q2 report attached." }}
+  ]
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """.strip()

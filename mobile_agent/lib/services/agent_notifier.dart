@@ -299,6 +299,24 @@ class AgentNotifier extends Notifier<AgentState> {
       ],
     );
   }
+
+  /// Append an assistant-role message into the chat (e.g. after a HITL action
+  /// completes in a widget that calls the API directly).
+  void addAssistantMessage(String text) {
+    state = state.copyWith(
+      status: AgentStatus.idle,
+      activeLog: '',
+      messages: [
+        ...state.messages,
+        ChatMessage(
+          id: _uuid.v4(),
+          text: text,
+          timestamp: DateTime.now(),
+          sender: SenderType.agent,
+        ),
+      ],
+    );
+  }
 }
 
 final agentProvider = NotifierProvider<AgentNotifier, AgentState>(

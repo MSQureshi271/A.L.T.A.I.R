@@ -19,7 +19,7 @@ from app.ai.planner.planner_schema import TaskPlan, TaskStep
 from app.ai.safety.safety import SafetyRating
 from app.config.settings import settings
 from app.repositories.db_client import db_store_item, db_load_items
-from app.providers.google.gmail.api import read_emails, read_email_details
+from app.providers.google.gmail.api import read_emails, read_email_details, list_email_attachments
 from app.providers.google.calendar.api import get_calendar_events
 from app.capabilities.search.search_tools import search_web
 from app.capabilities.documents.document_tools import (
@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 _READ_DISPATCH: dict[str, callable] = {
     "read_emails": read_emails,
     "read_email_details": read_email_details,
+    "list_email_attachments": list_email_attachments,
     "get_events": get_calendar_events,
     "search_web": search_web,
     "search_my_documents": search_my_documents,
@@ -53,6 +54,7 @@ _PARAM_ALIASES: dict[str, dict[str, str]] = {
         "before_date": "before_date",
     },
     "read_email_details": {"email_id": "email_id"},
+    "list_email_attachments": {"email_id": "email_id"},
     "get_events": {"days_ahead": "days_ahead"},
     "search_web": {"query": "query"},
     "search_my_documents": {"query": "query", "document_name": "document_name"},
@@ -86,6 +88,19 @@ _WRITE_APPROVAL_MAP: dict[str, tuple[str, dict[str, str]]] = {
     "draft_email": (
         "send_email",
         {"recipient": "to", "subject": "subject", "body": "body"},
+    ),
+    "draft_email_with_attachment": (
+        "send_email_with_attachment",
+        {
+            "recipient": "to",
+            "subject": "subject",
+            "body": "body",
+            "document_names": "document_names",
+        },
+    ),
+    "download_email_attachment": (
+        "download_attachment",
+        {"email_id": "email_id", "attachments": "attachments"},
     ),
     "delete_email": (
         "delete_email",
@@ -436,6 +451,63 @@ async def execute_plan(
             data = {target: step.parameters.get(source, "") for source, target in param_remap.items()}
             data["plan_id"] = plan.plan_id
             data["step_id"] = step.step_id
+
+            # If staging an email with document attachment, resolve document_names -> attachments metadata
+            if step.action == "draft_email_with_attachment" or "document_names" in step.parameters:
+                from app.repositories.document_repository import load_document_records, load_document_by_name  # noqa: PLC0415
+
+                doc_names = step.parameters.get("document_names") or []
+                if isinstance(doc_names, str):
+                    doc_names = [d.strip() for d in doc_names.split(",") if d.strip()]
+
+                resolved_attachments = []
+                clarifications = []
+                for name in doc_names:
+                    rec = load_document_by_name(user_id, name)
+                    if rec:
+                        resolved_attachments.append({
+                            "document_id": rec.id,
+                            "filename": rec.filename,
+                            "display_name": rec.display_name,
+                            "mime_type": rec.mime_type,
+                            "storage_path": rec.storage_path,
+                            "file_size_bytes": rec.file_size_bytes,
+                        })
+                    else:
+                        all_recs = load_document_records(user_id)
+                        needle = name.strip().lower()
+                        matches = [
+                            r for r in all_recs
+                            if needle in r.display_name.lower() or needle in r.filename.lower()
+                        ]
+                        if len(matches) == 1:
+                            r = matches[0]
+                            resolved_attachments.append({
+                                "document_id": r.id,
+                                "filename": r.filename,
+                                "display_name": r.display_name,
+                                "mime_type": r.mime_type,
+                                "storage_path": r.storage_path,
+                                "file_size_bytes": r.file_size_bytes,
+                            })
+                        elif len(matches) > 1:
+                            opts = ", ".join(f"'{r.display_name}'" for r in matches[:5])
+                            clarifications.append(
+                                f"Multiple documents match '{name}': {opts}. Which one did you mean?"
+                            )
+                        else:
+                            clarifications.append(
+                                f"No document named '{name}' found in your Document Library."
+                            )
+
+                if clarifications:
+                    step.status = "failed"
+                    save_active_plan(plan)
+                    yield {"type": "result", "text": " ".join(clarifications)}
+                    return
+
+                data["attachments"] = resolved_attachments
+                step.parameters["attachments"] = resolved_attachments
 
             if safety_rating:
                 data["safety_warning"] = safety_rating.scope_warning

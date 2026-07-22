@@ -22,6 +22,9 @@ class TaskStep(BaseModel):
     action: Literal[
         "read_emails",
         "draft_email",
+        "list_email_attachments",
+        "download_email_attachment",
+        "draft_email_with_attachment",
         "delete_email",
         "read_email_details",
         "get_events",

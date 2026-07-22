@@ -6,6 +6,7 @@ import '../services/agent_notifier.dart';
 import '../widgets/voice_visualizer.dart';
 import '../widgets/agent_status_card.dart';
 import '../widgets/approval_drawer.dart';
+import '../widgets/approval_card_attachment.dart';
 import '../widgets/app_drawer.dart';
 import '../widgets/plan_preview_card.dart';
 import '../widgets/workflow_progress_card.dart';
@@ -35,12 +36,57 @@ class _VoiceHomeViewState extends ConsumerState<VoiceHomeView> {
   }
 
   void _showApprovalDrawer(BuildContext context, AgentState state) {
+    final action = state.pendingAction!;
+    final actionType = action.actionType;
+
+    // Route download_attachment to the batch checkbox card
+    if (actionType == 'download_attachment') {
+      showModalBottomSheet(
+        context: context,
+        isScrollControlled: true,
+        backgroundColor: Colors.transparent,
+        builder: (context) => DraggableScrollableSheet(
+          initialChildSize: 0.6,
+          minChildSize: 0.4,
+          maxChildSize: 0.9,
+          expand: false,
+          builder: (context, scrollController) => Container(
+            decoration: const BoxDecoration(
+              color: Color(0xFF0F0F12),
+              borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+            ),
+            child: SingleChildScrollView(
+              controller: scrollController,
+              child: ApprovalCardAttachment(
+                approvalData: {
+                  'type': 'approval_required',
+                  'action': actionType,
+                  'data': action.data,
+                },
+                onCancel: () {
+                  ref.read(agentProvider.notifier).cancelAction();
+                  Navigator.pop(context);
+                },
+                onSuccess: (message) {
+                  Navigator.pop(context);
+                  ref.read(agentProvider.notifier).cancelAction();
+                  ref.read(agentProvider.notifier).addAssistantMessage(message);
+                },
+              ),
+            ),
+          ),
+        ),
+      );
+      return;
+    }
+
+    // Default path: use the generic schema-driven ApprovalDrawer
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (context) => ApprovalDrawer(
-        action: state.pendingAction!,
+        action: action,
         onCancel: () {
           ref.read(agentProvider.notifier).cancelAction();
           Navigator.pop(context);

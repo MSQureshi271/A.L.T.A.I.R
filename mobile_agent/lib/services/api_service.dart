@@ -686,5 +686,46 @@ class ApiService {
       throw Exception('Delete failed (${response.statusCode}): ${response.body}');
     }
   }
+
+  // ── Email Attachment Methods ────────────────────────────────────────────────
+
+  /// Fetch attachment metadata for a Gmail message without downloading any bytes.
+  /// Returns a list of attachment maps: {filename, mime_type, size_bytes, attachment_id, email_id}.
+  Future<List<Map<String, dynamic>>> listEmailAttachments(String emailId) async {
+    final uri = Uri.parse('$_backendBaseUrl/email/$emailId/attachments');
+    final response = await http.get(uri).timeout(const Duration(seconds: 20));
+
+    if (response.statusCode == 200) {
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      final attachments = (data['attachments'] as List<dynamic>?) ?? [];
+      return attachments.cast<Map<String, dynamic>>();
+    }
+    throw Exception('Failed to list attachments (${response.statusCode}): ${response.body}');
+  }
+
+  /// Execute a confirmed attachment download (after the user approves on the batch card).
+  /// [attachments] is the list with 'selected' field set by the user on the card.
+  Future<Map<String, dynamic>> executeDownloadAttachment({
+    required String emailId,
+    required List<Map<String, dynamic>> attachments,
+  }) async {
+    final uri = Uri.parse('$_backendBaseUrl/agent/execute-action');
+    final body = jsonEncode({
+      'action': 'download_attachment',
+      'data': {
+        'email_id': emailId,
+        'attachments': attachments,
+      },
+    });
+
+    final response = await http
+        .post(uri, headers: {'Content-Type': 'application/json'}, body: body)
+        .timeout(const Duration(seconds: 120)); // ingestion can take time
+
+    if (response.statusCode == 200) {
+      return jsonDecode(response.body) as Map<String, dynamic>;
+    }
+    throw Exception('Attachment download failed (${response.statusCode}): ${response.body}');
+  }
 }
 

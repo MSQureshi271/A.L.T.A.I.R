@@ -410,6 +410,31 @@ def delete_document_file(storage_path: str) -> None:
             local_path.unlink()
 
 
+def get_document_file_bytes(storage_path: str) -> bytes:
+    """
+    Retrieve raw file bytes for a document from Supabase Storage or the local fallback.
+
+    Used when attaching a stored document to an outgoing email via Gmail.
+    The storage_path is the value stored in DocumentRecord.storage_path.
+    """
+    sb = _get_supabase()
+    if sb:
+        try:
+            data = sb.storage.from_(settings.DOCUMENTS_BUCKET).download(storage_path)
+            logger.info("Downloaded file from Supabase Storage: %s (%d bytes)", storage_path, len(data))
+            return data
+        except Exception as exc:
+            logger.exception("Supabase Storage download failed: %s", exc)
+            raise RuntimeError(f"Could not download file from storage: {exc}") from exc
+    else:
+        local_path = _DOC_FILES_DIR / Path(storage_path)
+        if not local_path.exists():
+            raise FileNotFoundError(f"Local file not found: {local_path}")
+        data = local_path.read_bytes()
+        logger.info("Read local file: %s (%d bytes)", local_path, len(data))
+        return data
+
+
 # ── Local fallback implementations ────────────────────────────────────────────
 
 
@@ -514,6 +539,8 @@ def _row_to_record(row: dict) -> DocumentRecord:
         error_message=row.get("error_message"),
         tags=row.get("tags") or [],
         embedding_model=row.get("embedding_model", ""),
+        source_type=row.get("source_type", "upload"),
+        source_email_id=row.get("source_email_id"),
         created_at=str(row.get("created_at", "")),
         updated_at=str(row.get("updated_at", "")),
     )

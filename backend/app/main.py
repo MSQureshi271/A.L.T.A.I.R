@@ -304,6 +304,7 @@ async def execute_action(
                 subject=data.get("subject", ""),
                 body=data.get("body", ""),
                 user_id=user_id,
+                attachments=data.get("attachments") or None,
             )
             return {"status": "success", "message": message}
         except RuntimeError as exc:
@@ -311,6 +312,46 @@ async def execute_action(
         except Exception as exc:  # noqa: BLE001
             logger.exception("Gmail send failed")
             raise HTTPException(status_code=500, detail=f"Gmail send failed: {exc}") from exc
+
+    elif action == "send_email_with_attachment":
+        from app.providers.google.gmail.api import send_email_via_gmail  # noqa: PLC0415
+        try:
+            message = send_email_via_gmail(
+                to=data.get("to", "") or data.get("recipient", ""),
+                subject=data.get("subject", ""),
+                body=data.get("body", ""),
+                user_id=user_id,
+                attachments=data.get("attachments") or [],
+            )
+            return {"status": "success", "message": message}
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Gmail send with attachment failed")
+            raise HTTPException(status_code=500, detail=f"Gmail send with attachment failed: {exc}") from exc
+
+    elif action == "download_attachment":
+        from app.providers.google.gmail.api import _ingest_attachment_bytes  # noqa: PLC0415
+        try:
+            attachments_to_save = [
+                a for a in (data.get("attachments") or [])
+                if a.get("selected", True)
+            ]
+            if not attachments_to_save:
+                return {"status": "success", "message": "No attachments selected for download."}
+
+            results = []
+            for att in attachments_to_save:
+                doc_ref = _ingest_attachment_bytes(
+                    user_id=user_id,
+                    email_id=att.get("email_id", data.get("email_id", "")),
+                    attachment_id=att["attachment_id"],
+                    filename=att["filename"],
+                    mime_type=att.get("mime_type", "application/octet-stream"),
+                )
+                results.append(f"{att['filename']} → {doc_ref}")
+            return {"status": "success", "message": "✅ " + "; ".join(results)}
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Attachment download failed")
+            raise HTTPException(status_code=500, detail=f"Attachment download failed: {exc}") from exc
 
     elif action == "delete_email":
         from app.providers.google.gmail.api import delete_email_via_gmail  # noqa: PLC0415
@@ -572,12 +613,56 @@ def _execute_write_step_action(action: str, parameters: dict, user_id: str) -> s
     """Invokes the real write action python tool function."""
     if action == "draft_email":
         from app.providers.google.gmail.api import send_email_via_gmail  # noqa: PLC0415
+        # Support attachments if the plan carried resolved attachment metadata
+        attachments = parameters.get("attachments") or None
         return send_email_via_gmail(
             to=parameters.get("recipient", ""),
             subject=parameters.get("subject", ""),
             body=parameters.get("body", ""),
-            user_id=user_id
+            user_id=user_id,
+            attachments=attachments,
         )
+    elif action == "draft_email_with_attachment":
+        from app.providers.google.gmail.api import send_email_via_gmail  # noqa: PLC0415
+        return send_email_via_gmail(
+            to=parameters.get("recipient", "") or parameters.get("to", ""),
+            subject=parameters.get("subject", ""),
+            body=parameters.get("body", ""),
+            user_id=user_id,
+            attachments=parameters.get("attachments") or [],
+        )
+    elif action == "send_email_with_attachment":
+        # Called from resume-plan after user approves the HITL card
+        from app.providers.google.gmail.api import send_email_via_gmail  # noqa: PLC0415
+        return send_email_via_gmail(
+            to=parameters.get("to", ""),
+            subject=parameters.get("subject", ""),
+            body=parameters.get("body", ""),
+            user_id=user_id,
+            attachments=parameters.get("attachments") or [],
+        )
+    elif action == "download_attachment":
+        # Called from resume-plan after user approves the attachment download card
+        from app.providers.google.gmail.api import _ingest_attachment_bytes  # noqa: PLC0415
+        # parameters.attachments is the list from the batch confirmation card
+        # Each entry: {email_id, attachment_id, filename, mime_type, selected: True/False}
+        attachments_to_save = [
+            a for a in (parameters.get("attachments") or [])
+            if a.get("selected", True)  # deselected items have selected=False
+        ]
+        if not attachments_to_save:
+            return "No attachments selected for download."
+        results = []
+        for att in attachments_to_save:
+            doc_ref = _ingest_attachment_bytes(
+                user_id=user_id,
+                email_id=att.get("email_id", parameters.get("email_id", "")),
+                attachment_id=att["attachment_id"],
+                filename=att["filename"],
+                mime_type=att.get("mime_type", "application/octet-stream"),
+            )
+            results.append(f"{att['filename']} → {doc_ref}")
+        return "✅ " + "; ".join(results)
     elif action == "delete_email":
         from app.providers.google.gmail.api import delete_email_via_gmail  # noqa: PLC0415
         return delete_email_via_gmail(
@@ -951,7 +1036,45 @@ async def webhook_google_calendar(
     return {"status": "processed"}
 
 
+# ── Email Attachment Endpoints ─────────────────────────────────────────────────
+
+
+@app.get("/email/{email_id}/attachments", tags=["Email"])
+async def get_email_attachments(email_id: str) -> dict:
+    """
+    List the file attachments in a specific Gmail message.
+
+    Returns structured metadata (filename, mime_type, size_bytes, attachment_id)
+    without downloading any bytes. Used by the Flutter batch-confirmation card
+    to show the user which attachments they can save to the Document Library.
+    """
+    from app.providers.google.gmail.api import list_email_attachments  # noqa: PLC0415
+    import json as _json  # noqa: PLC0415
+
+    result_text = list_email_attachments(email_id)
+
+    # Parse the structured [ATTACHMENT_METADATA] JSON block embedded in the result
+    attachments: list[dict] = []
+    marker = "[ATTACHMENT_METADATA]:"
+    if marker in result_text:
+        try:
+            json_str = result_text.split(marker, 1)[1].strip()
+            attachments = _json.loads(json_str)
+            # Inject the parent email_id into each attachment record for the Flutter card
+            for att in attachments:
+                att["email_id"] = email_id
+        except Exception:  # noqa: BLE001
+            pass
+
+    return {
+        "email_id": email_id,
+        "attachments": attachments,
+        "summary": result_text.split(marker)[0].strip(),
+    }
+
+
 # ── Document Intelligence Endpoints ───────────────────────────────────────────
+
 
 _ALLOWED_MIME_TYPES = {
     "application/pdf",

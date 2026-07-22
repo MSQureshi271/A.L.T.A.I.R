@@ -28,6 +28,9 @@ class DocumentRecord(BaseModel):
     error_message: str | None = None
     tags: list[str] = Field(default_factory=list)
     embedding_model: str = ""              # e.g. "gemini/gemini-embedding-2" — stored for future re-embed migrations
+    # Provenance: 'upload' for manual uploads, 'email_attachment' for Gmail-sourced files.
+    source_type: str = "upload"
+    source_email_id: str | None = None    # Gmail message ID when source_type == 'email_attachment'
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 

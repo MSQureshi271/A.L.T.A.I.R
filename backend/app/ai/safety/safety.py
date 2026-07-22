@@ -210,4 +210,18 @@ def classify(step: TaskStep, context: dict) -> SafetyRating:
     if action in ("draft_email", "create_event", "reschedule_event"):
         return SafetyRating(level="caution")
 
+    # 5. Email attachment download — saves bytes to Document Library (medium risk)
+    if action == "download_email_attachment":
+        return SafetyRating(
+            level="caution",
+            scope_warning="This will download the selected attachment(s) from Gmail and save them to your Document Library.",
+        )
+
+    # 6. Email with document attachment — sends your documents externally (high risk)
+    if action == "draft_email_with_attachment":
+        return SafetyRating(
+            level="caution",
+            scope_warning="This will attach document(s) from your library to an outgoing email and send them to the recipient.",
+        )
+
     return SafetyRating(level="safe")

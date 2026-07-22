@@ -17,6 +17,8 @@ class DocumentRecord {
   final String? errorMessage;
   final List<String> tags;
   final String embeddingModel;
+  final String sourceType; // 'upload' | 'email_attachment'
+  final String? sourceEmailId;
   final String createdAt;
   final String updatedAt;
 
@@ -35,6 +37,8 @@ class DocumentRecord {
     this.errorMessage,
     this.tags = const [],
     this.embeddingModel = '',
+    this.sourceType = 'upload',
+    this.sourceEmailId,
     this.createdAt = '',
     this.updatedAt = '',
   });
@@ -55,6 +59,8 @@ class DocumentRecord {
       errorMessage: json['error_message'] as String?,
       tags: (json['tags'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? [],
       embeddingModel: json['embedding_model'] as String? ?? '',
+      sourceType: json['source_type'] as String? ?? 'upload',
+      sourceEmailId: json['source_email_id'] as String?,
       createdAt: json['created_at'] as String? ?? '',
       updatedAt: json['updated_at'] as String? ?? '',
     );
@@ -65,6 +71,7 @@ class DocumentRecord {
   bool get isProcessing => status == 'processing';
   bool get isReady => status == 'ready';
   bool get isError => status == 'error';
+  bool get isFromEmail => sourceType == 'email_attachment';
 
   String get formattedSize {
     if (fileSizeBytes < 1024) return '$fileSizeBytes B';

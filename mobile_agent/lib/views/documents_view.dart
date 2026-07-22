@@ -128,7 +128,7 @@ class _DocumentsViewState extends State<DocumentsView>
   // ── Upload ────────────────────────────────────────────────────────────────
 
   Future<void> _pickAndUpload() async {
-    final result = await FilePicker.platform.pickFiles(
+    final result = await FilePicker.pickFiles(
       type: FileType.custom,
       allowedExtensions: ['pdf', 'docx', 'doc', 'txt', 'md', 'csv'],
       withData: false,

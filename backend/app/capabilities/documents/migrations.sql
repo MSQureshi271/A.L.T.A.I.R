@@ -150,3 +150,20 @@ $$;
 --     FOR ALL USING (user_id = auth.uid()::text);
 -- CREATE POLICY "Users access own chunks" ON public.document_chunks
 --     FOR ALL USING (user_id = auth.uid()::text);
+
+
+-- ───────────────────────────────────────────────────────────────────────────────
+-- Migration Addendum: Email Attachment Provenance
+-- Run this section only if you already executed the main migration above.
+-- If running for the first time, the CREATE TABLE statement above already
+-- includes these columns via the models.py schema; you can skip this block.
+-- ───────────────────────────────────────────────────────────────────────────────
+ALTER TABLE public.document_records
+    ADD COLUMN IF NOT EXISTS source_type      TEXT NOT NULL DEFAULT 'upload',
+    ADD COLUMN IF NOT EXISTS source_email_id  TEXT;
+
+COMMENT ON COLUMN public.document_records.source_type IS
+    '''upload'' for manually uploaded files, ''email_attachment'' for files downloaded from Gmail.';
+COMMENT ON COLUMN public.document_records.source_email_id IS
+    'Gmail message ID from which this attachment was downloaded. NULL for manual uploads.';
+
