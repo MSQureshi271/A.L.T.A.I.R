@@ -34,18 +34,20 @@ class _AppDrawerState extends ConsumerState<AppDrawer> {
   }
 
   Future<void> _loadStatuses() async {
-    final status = await _authService.getGoogleStatus();
-    final connected = status.connected;
+    final googleStatus = await _authService.getGoogleStatus();
+    final notionStatus = await _authService.getNotionStatus();
     if (mounted) {
       setState(() {
         _statusMap = {
-          'gmail': connected,
-          'google_calendar': connected,
+          'gmail': googleStatus.connected,
+          'google_calendar': googleStatus.connected,
+          'notion': notionStatus.connected,
         };
         _statusLoading = false;
       });
     }
   }
+
 
   Future<void> _handleLogout() async {
     Navigator.pop(context); // close drawer first

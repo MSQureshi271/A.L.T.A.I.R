@@ -201,6 +201,52 @@ Tool: watcher
     }}
     requires_confirmation: true   ← write action, always true
 
+Tool: notion
+  action: "search_notion"
+    parameters: {{ "query": <str, search keyword or phrase across Notion pages and databases> }}
+    requires_confirmation: false  ← read-only, always false
+
+  action: "read_notion_page"
+    parameters: {{ "page_id": <str, unique Notion page ID> }}
+    requires_confirmation: false  ← read-only, always false
+
+  action: "query_notion_database"
+    parameters: {{ "database_id": <str, unique Notion database ID>, "filter_description": <str, optional hint> }}
+    requires_confirmation: false  ← read-only, always false
+
+  action: "list_notion_databases"
+    parameters: {{}}
+    requires_confirmation: false  ← read-only, always false
+
+  action: "create_notion_page"
+    parameters: {{ "parent_page_id": <str>, "title": <str>, "content": <str> }}
+    requires_confirmation: true   ← write action, always true
+
+  action: "create_notion_database_entry"
+    parameters: {{ "database_id": <str>, "properties": <JSON object dict of key-value pairs, e.g. {{"Name": "Task", "Status": "Completed"}}>, "content": <str, optional> }}
+    requires_confirmation: true   ← write action, always true
+
+  action: "append_notion_page"
+    parameters: {{ "page_id": <str>, "content": <str> }}
+    requires_confirmation: true   ← write action, always true
+
+  action: "update_notion_database_entry"
+    parameters: {{ "page_id": <str, Notion database row page ID or title e.g. 'Finalizer'>, "data_source_id": <str, Notion database or data source ID or title e.g. 'Q3 Reports 25'>, "properties": <JSON object dict of updated key-value pairs, e.g. {{"Status": "Completed", "Number": 60}}> }}
+    requires_confirmation: true   ← write action, always true
+
+  action: "update_notion_page_content"
+    parameters: {{ "page_id": <str, Notion page ID or title>, "old_str": <str, optional text to find and replace>, "new_str": <str, replacement text or new markdown content> }}
+
+    requires_confirmation: true   ← write action, always true
+
+  action: "update_notion_data_source"
+    parameters: {{ "data_source_id": <str, Notion data source ID or title>, "title": <str, new title for the database/data source> }}
+    requires_confirmation: true   ← write action, always true
+
+  action: "complete_notion_todo_item"
+    parameters: {{ "page_id": <str, Notion page ID or title>, "item_text": <str, text of the to-do item to check or uncheck, e.g. 'Boil the milk'>, "completed": <bool, default true, set false to uncheck> }}
+    requires_confirmation: true   ← write action, always true
+
 Tool: none
 
   action: "clarify"
@@ -210,8 +256,11 @@ Tool: none
 
 ━━━ RULES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-1. requires_confirmation MUST be true for: draft_email, draft_email_with_attachment, download_email_attachment, delete_email, create_event, reschedule_event, delete_event, save_contact, save_preference, save_routine, save_knowledge, delete_memory, create_watcher, delete_watcher.
-2. requires_confirmation MUST be false for: read_emails, read_email_details, list_email_attachments, get_events, search_web, search_my_documents, get_document_summary, list_my_documents.
+1. requires_confirmation MUST be true for: draft_email, draft_email_with_attachment, download_email_attachment, delete_email, create_event, reschedule_event, delete_event, save_contact, save_preference, save_routine, save_knowledge, delete_memory, create_watcher, delete_watcher, create_notion_page, create_notion_database_entry, append_notion_page, update_notion_database_entry, update_notion_page_content, update_notion_data_source, complete_notion_todo_item.
+
+
+2. requires_confirmation MUST be false for: read_emails, read_email_details, list_email_attachments, get_events, search_web, search_my_documents, get_document_summary, list_my_documents, search_notion, read_notion_page, query_notion_database, list_notion_databases.
+
 3. If the user's request is genuinely ambiguous (e.g. "email someone" with no
    name, or "schedule something" with no date or title), set ambiguity_question
    and return an EMPTY steps list.
@@ -222,8 +271,23 @@ Tool: none
 8. If the conversation history shows that the user previously read emails or
    events, you may reference that context when retrieving details or replying.
 9. When the user asks to email a document: use draft_email_with_attachment with document_names list. If 2+ documents match the name, return a clarify step asking the user which one they mean.
+10. Document Intelligence: When the user asks to summarize, search, or read an uploaded document by name, pass the document title/keyword as document_name. If no specific name is mentioned or you need to inspect available files, plan Step 1 as list_my_documents and Step 2 as search_my_documents/get_document_summary with depends_on: [1].
+11. Notion Auto-Search: When the user asks to read, query, create, or append to a Notion page or database by title/name (e.g. 'Weekly Sync'), you may pass the human title string directly in page_id/database_id parameters (the system automatically resolves titles to Notion UUIDs), or plan Step 1 as search_notion and Step 2 as the Notion action with depends_on: [1].
+12. Notion Update Actions: When planning update_notion_database_entry, update_notion_page_content, or update_notion_data_source, NEVER leave page_id or data_source_id empty. Pass the user's specified title or database name (e.g. page_id: "Monthly", data_source_id: "Q3 reports 25"). The system automatically resolves human titles to Notion UUIDs before execution.
+
+13. Notion Markdown Formatting Syntax:
+    - To-Do / Checklist items: use `[] Task`
+    - Toggle List blocks: use `> Collapsible title`
+    - Callout boxes: use `> [!NOTE] text`, `> [!WARNING] text`, `> [!IMPORTANT] text`, or `> [!TIP] text`.
+    - Headings: use `# Heading 1`, `## Heading 2`, `### Heading 3`.
+    - Bulleted lists: use `- Item`
+    - Numbered lists: use `1. Item`
+    - Code blocks: use triple backticks ``` for multi-line code, or single backticks `code` for inline code.
+
+
 
 ━━━ EXAMPLES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 
 User: "Remember that Bob is my accountant and his email is bob@firm.com"
 → intent_summary: "Save contact details for Bob as accountant."
@@ -473,23 +537,32 @@ def plan(user_text: str, history: list[dict] | None = None) -> TaskPlan:
     logger.debug("Planner invoked for: %r", user_text)
 
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model=settings.GEMINI_MODEL,
         contents=user_content,
         config=types.GenerateContentConfig(
             system_instruction=system_prompt,
-            # response_mime_type enforces JSON output without needing
-            # response_schema (which requires Gemini Enterprise for dict fields).
-            # We validate the JSON ourselves with Pydantic below.
             response_mime_type="application/json",
             temperature=0.0,
         ),
     )
 
     raw_json = response.text
-    task_plan = TaskPlan.model_validate_json(raw_json)
+    import json
+    try:
+        data = json.loads(raw_json)
+        if isinstance(data, list):
+            data = {
+                "intent_summary": user_text,
+                "steps": data,
+            }
+        task_plan = TaskPlan.model_validate(data)
+    except Exception:
+        task_plan = TaskPlan.model_validate_json(raw_json)
+
     logger.info(
         "Planner produced plan: intent=%r steps=%d",
         task_plan.intent_summary,
         len(task_plan.steps),
     )
     return task_plan
+

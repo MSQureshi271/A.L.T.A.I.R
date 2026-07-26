@@ -88,7 +88,7 @@ def compile_trigger_dsl(provider: str, description: str) -> dict[str, Any]:
         )
 
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model=settings.GEMINI_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(
                 system_instruction=_BUILDER_SYSTEM_PROMPT,

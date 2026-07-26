@@ -79,6 +79,60 @@ class AuthService {
       return false;
     }
   }
+
+  // ── Notion OAuth ──────────────────────────────────────────────────────────
+
+  /// Open the Notion OAuth consent screen in the system browser.
+  Future<bool> launchNotionLogin() async {
+    final uri = Uri.parse('$_authBaseUrl/auth/notion/login');
+    try {
+      final launched = await launchUrl(
+        uri,
+        mode: LaunchMode.externalApplication,
+      );
+      return launched;
+    } catch (e) {
+      debugPrint('AuthService: failed to launch Notion login — $e');
+      return false;
+    }
+  }
+
+  /// Fetch the current Notion connection status from the backend.
+  Future<NotionAuthStatus> getNotionStatus() async {
+    try {
+      final uri = Uri.parse('$_authBaseUrl/auth/notion/status');
+      final response = await http
+          .get(uri)
+          .timeout(const Duration(seconds: 8));
+
+      if (response.statusCode == 200) {
+        final body = jsonDecode(response.body) as Map<String, dynamic>;
+        return NotionAuthStatus(
+          connected: body['connected'] as bool? ?? false,
+          workspaceName: body['workspace_name'] as String? ?? '',
+          workspaceIcon: body['workspace_icon'] as String? ?? '',
+        );
+      }
+      return const NotionAuthStatus(connected: false);
+    } catch (e) {
+      debugPrint('AuthService: failed to fetch Notion status — $e');
+      return const NotionAuthStatus(connected: false, error: true);
+    }
+  }
+
+  /// Disconnect Notion by clearing stored tokens from the backend.
+  Future<bool> disconnectNotion() async {
+    try {
+      final uri = Uri.parse('$_authBaseUrl/auth/notion/disconnect');
+      final response = await http
+          .get(uri)
+          .timeout(const Duration(seconds: 8));
+      return response.statusCode == 200;
+    } catch (e) {
+      debugPrint('AuthService: failed to disconnect Notion — $e');
+      return false;
+    }
+  }
 }
 
 /// Immutable snapshot of the Google OAuth connection state.
@@ -95,3 +149,19 @@ class GoogleAuthStatus {
     this.error = false,
   });
 }
+
+/// Immutable snapshot of the Notion OAuth connection state.
+class NotionAuthStatus {
+  final bool connected;
+  final String workspaceName;
+  final String workspaceIcon;
+  final bool error;
+
+  const NotionAuthStatus({
+    required this.connected,
+    this.workspaceName = '',
+    this.workspaceIcon = '',
+    this.error = false,
+  });
+}
+

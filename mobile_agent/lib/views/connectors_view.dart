@@ -29,16 +29,15 @@ class _ConnectorsViewState extends State<ConnectorsView> {
 
   Future<void> _refreshStatuses() async {
     setState(() => _initialLoading = true);
-    final status = await _authService.getGoogleStatus();
-    final connected = status.connected;
+    final googleStatus = await _authService.getGoogleStatus();
+    final notionStatus = await _authService.getNotionStatus();
 
-    // Both Gmail and Google Calendar share the same OAuth token.
-    // We treat the connection as on/off for both simultaneously.
     if (mounted) {
       setState(() {
         _statusMap = {
-          'gmail': connected,
-          'google_calendar': connected,
+          'gmail': googleStatus.connected,
+          'google_calendar': googleStatus.connected,
+          'notion': notionStatus.connected,
         };
         _initialLoading = false;
       });
@@ -46,9 +45,13 @@ class _ConnectorsViewState extends State<ConnectorsView> {
   }
 
   Future<void> _handleConnect(ConnectorConfig connector) async {
-    // For now all connectors use the same Google OAuth flow.
-    // Future connectors can dispatch to different auth methods here.
-    final launched = await _authService.launchGoogleLogin();
+    final bool launched;
+    if (connector.id == 'notion') {
+      launched = await _authService.launchNotionLogin();
+    } else {
+      launched = await _authService.launchGoogleLogin();
+    }
+
     if (!launched && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -79,9 +82,14 @@ class _ConnectorsViewState extends State<ConnectorsView> {
     final confirmed = await _showDisconnectDialog(connector.name);
     if (!confirmed || !mounted) return;
 
-    await _authService.disconnectGoogle();
+    if (connector.id == 'notion') {
+      await _authService.disconnectNotion();
+    } else {
+      await _authService.disconnectGoogle();
+    }
     await _refreshStatuses();
   }
+
 
   Future<bool> _showDisconnectDialog(String name) async {
     return await showDialog<bool>(

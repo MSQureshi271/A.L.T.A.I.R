@@ -133,7 +133,24 @@ def load_tokens(user_id: str, provider: str) -> dict[str, Any] | None:
 def is_connected(user_id: str, provider: str) -> bool:
     """Return True if tokens exist for this user + provider."""
     tokens = load_tokens(user_id, provider)
-    return tokens is not None and bool(tokens.get("refresh_token"))
+    if not tokens:
+        return False
+    return bool(tokens.get("access_token")) or bool(tokens.get("refresh_token"))
+
+
+def delete_tokens(user_id: str, provider: str) -> None:
+    """Delete OAuth tokens for *user_id* and *provider*."""
+    sb = _get_supabase()
+    if sb:
+        sb.table("user_credentials").delete().eq("user_id", user_id).eq("provider", provider).execute()
+        logger.info("Tokens deleted from Supabase for user=%s provider=%s", user_id, provider)
+    else:
+        cache = _read_cache()
+        if user_id in cache and provider in cache[user_id]:
+            del cache[user_id][provider]
+            _write_cache(cache)
+            logger.info("Tokens deleted from local cache for user=%s provider=%s", user_id, provider)
+
 
 
 # ── Generic Memory Database Layer (Supabase + Local Cache Fallback) ──────────

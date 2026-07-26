@@ -242,6 +242,11 @@ def create_google_calendar_event(
         "end": {"dateTime": end_dt.isoformat(), "timeZone": user_tz},
     }
 
+    if isinstance(attendees, str):
+        attendees = [a.strip() for a in attendees.split(",") if a.strip()]
+    elif not attendees:
+        attendees = []
+
     if attendees:
         event_body["attendees"] = [{"email": email} for email in attendees]
 

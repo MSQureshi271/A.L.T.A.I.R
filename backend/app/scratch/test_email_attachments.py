@@ -43,6 +43,11 @@ class TestEmailAttachmentsIntegration(unittest.TestCase):
         self.assertEqual(result.get("type"), "clarification_needed")
         self.assertIn("No document named", result.get("question", ""))
 
+    def test_attendees_normalization(self):
+        attendees_input = "user1@example.com, user2@example.com"
+        normalized = [a.strip() for a in attendees_input.split(",") if a.strip()]
+        self.assertEqual(normalized, ["user1@example.com", "user2@example.com"])
+
 
 if __name__ == "__main__":
     unittest.main()

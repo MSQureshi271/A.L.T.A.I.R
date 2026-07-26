@@ -38,12 +38,12 @@ const List<ConnectorConfig> kConnectors = [
     icon: Icons.calendar_month_rounded,
     accentColor: Color(0xFF38B000),
   ),
-  // ── Future connectors ──────────────────────────────────────────────────────
-  // ConnectorConfig(
-  //   id: 'notion',
-  //   name: 'Notion',
-  //   description: 'Read and write Notion pages and databases.',
-  //   icon: Icons.note_rounded,
-  //   accentColor: Color(0xFFFFB703),
-  // ),
+  ConnectorConfig(
+    id: 'notion',
+    name: 'Notion',
+    description: 'Read pages, query databases, create notes and tasks.',
+    icon: Icons.note_alt_rounded,
+    accentColor: Color(0xFFFFB703),
+  ),
 ];
+

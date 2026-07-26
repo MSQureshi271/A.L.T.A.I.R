@@ -37,6 +37,7 @@ from app.ai.executor.executor import execute_plan, save_active_plan, load_active
 from app.ai.planner.planner_schema import TaskPlan, TaskStep
 
 from app.providers.google.oauth import router as auth_router
+from app.providers.notion.notion_router import router as notion_auth_router
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -98,6 +99,7 @@ app.add_middleware(
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(auth_router, prefix="/auth")
+app.include_router(notion_auth_router, prefix="/auth")
 
 # ── Request / Response models ─────────────────────────────────────────────────
 
@@ -213,7 +215,7 @@ async def agent_voice(
             client = genai.Client(api_key=settings.GEMINI_API_KEY)
             
             response = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model=settings.GEMINI_MODEL,
                 contents=[
 
                     types.Content(
@@ -493,9 +495,10 @@ async def execute_action(
             elif category == "knowledge":
                 from app.capabilities.memory.memory_manager import delete_knowledge  # noqa: PLC0415
                 delete_knowledge(user_id, key)
-            return {"status": "success", "message": f"Forgot '{key}'."}
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"Failed to forget: {exc}") from exc
+
+    elif action == "create_watcher":
 
         from app.repositories.watcher_repository import save_watcher, save_watcher_trigger, save_watcher_action  # noqa: PLC0415
         from app.watchers.builder import compile_trigger_dsl  # noqa: PLC0415
@@ -533,6 +536,7 @@ async def execute_action(
             logger.exception("Failed to create watcher")
             raise HTTPException(status_code=500, detail=f"Failed to create watcher: {exc}") from exc
 
+    elif action == "delete_watcher":
         from app.repositories.watcher_repository import delete_watcher, load_watchers  # noqa: PLC0415
         try:
             watcher_id = data.get("watcher_id")
@@ -555,8 +559,79 @@ async def execute_action(
             logger.exception("Failed to delete watcher")
             raise HTTPException(status_code=500, detail=f"Failed to delete watcher: {exc}") from exc
 
+
+    elif action == "create_notion_page":
+        from app.providers.notion.api import _get_notion_client, _content_to_blocks  # noqa: PLC0415
+        client = _get_notion_client()
+        if not client:
+            raise HTTPException(status_code=401, detail="Notion is not connected.")
+        try:
+            new_page = client.pages.create(
+                parent={"page_id": data["parent_page_id"]},
+                properties={
+                    "title": {
+                        "title": [{"type": "text", "text": {"content": data["title"]}}]
+                    }
+                },
+                children=_content_to_blocks(data["content"]),
+            )
+            return {
+                "status": "success",
+                "message": f"Created Notion page '{data['title']}'.",
+                "page_url": new_page.get("url", ""),
+                "page_id": new_page.get("id", ""),
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Notion page creation failed")
+            raise HTTPException(status_code=500, detail=f"Notion page creation failed: {exc}") from exc
+
+    elif action == "create_notion_database_entry":
+        from app.providers.notion.api import (  # noqa: PLC0415
+            _get_notion_client,
+            _build_notion_properties,
+            _content_to_blocks,
+        )
+        client = _get_notion_client()
+        if not client:
+            raise HTTPException(status_code=401, detail="Notion is not connected.")
+        try:
+            new_entry = client.pages.create(
+                parent={"database_id": data["database_id"]},
+                properties=_build_notion_properties(data.get("properties", {})),
+                children=_content_to_blocks(data.get("content") or ""),
+            )
+            return {
+                "status": "success",
+                "message": "Created Notion database record.",
+                "page_url": new_entry.get("url", ""),
+                "page_id": new_entry.get("id", ""),
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Notion DB entry creation failed")
+            raise HTTPException(status_code=500, detail=f"Notion DB entry creation failed: {exc}") from exc
+
+    elif action == "append_notion_page":
+        from app.providers.notion.api import _get_notion_client, _content_to_blocks  # noqa: PLC0415
+        client = _get_notion_client()
+        if not client:
+            raise HTTPException(status_code=401, detail="Notion is not connected.")
+        try:
+            client.blocks.children.append(
+                block_id=data["page_id"],
+                children=_content_to_blocks(data["content"]),
+            )
+            return {
+                "status": "success",
+                "message": "Appended content to Notion page.",
+                "page_id": data["page_id"],
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Notion append failed")
+            raise HTTPException(status_code=500, detail=f"Notion append failed: {exc}") from exc
+
     else:
         raise HTTPException(status_code=400, detail=f"Unknown action: {action}")
+
 
 
 @app.get("/agent/memory", tags=["Memory"])
@@ -809,25 +884,120 @@ def _execute_write_step_action(action: str, parameters: dict, user_id: str) -> s
         delete_watcher(user_id, watcher_id)
         return f"Successfully deleted Watcher '{desc or watcher_id}'."
 
+    elif action == "create_notion_page":
+        from app.providers.notion.api import _get_notion_client, _content_to_blocks, resolve_notion_id  # noqa: PLC0415
+        client = _get_notion_client()
+        if not client:
+            raise ValueError("Notion is not connected. Please link your Notion account in Connectors.")
+        parent_id = resolve_notion_id(parameters["parent_page_id"], "page")
+        new_page = client.pages.create(
+            parent={"page_id": parent_id},
+            properties={
+                "title": {
+                    "title": [{"type": "text", "text": {"content": parameters["title"]}}]
+                }
+            },
+            children=_content_to_blocks(parameters["content"]),
+        )
+        return f"Created Notion page '{parameters['title']}'. URL: {new_page.get('url', '')}"
+
+    elif action == "create_notion_database_entry":
+        from app.providers.notion.api import (  # noqa: PLC0415
+            _get_notion_client,
+            _build_notion_properties,
+            _content_to_blocks,
+            resolve_datasource_id,
+        )
+        client = _get_notion_client()
+        if not client:
+            raise ValueError("Notion is not connected. Please link your Notion account in Connectors.")
+        
+        raw_db_id = parameters["database_id"]
+        logger.info("[create_notion_database_entry] Received database_id parameter='%s'", raw_db_id)
+        data_source_id = resolve_datasource_id(raw_db_id)
+        logger.info("[create_notion_database_entry] Creating page with parent={'data_source_id': '%s'}", data_source_id)
+
+
+        props = _build_notion_properties(parameters.get("properties", {}), data_source_id=data_source_id)
+        children = _content_to_blocks(parameters.get("content") or "")
+
+
+        new_entry = client.pages.create(
+            parent={"data_source_id": data_source_id},
+            properties=props,
+            children=children,
+        )
+
+        entry_url = new_entry.get("url", "")
+        entry_id = new_entry.get("id", "")
+        logger.info("[create_notion_database_entry] SUCCESS! Created record ID='%s', URL='%s'", entry_id, entry_url)
+        return f"Created Notion database record. URL: {entry_url}"
+
+    elif action == "append_notion_page":
+        from app.providers.notion.api import _get_notion_client, _content_to_blocks, resolve_notion_id  # noqa: PLC0415
+        client = _get_notion_client()
+        if not client:
+            raise ValueError("Notion is not connected. Please link your Notion account in Connectors.")
+        page_id = resolve_notion_id(parameters["page_id"], "page")
+        client.blocks.children.append(
+            block_id=page_id,
+            children=_content_to_blocks(parameters["content"]),
+        )
+        return "Appended content to Notion page successfully."
+
+    elif action == "update_notion_database_entry":
+        from app.providers.notion.api import update_notion_database_entry  # noqa: PLC0415
+        return update_notion_database_entry(
+            page_id=parameters["page_id"],
+            properties=parameters.get("properties", {}),
+            data_source_id=parameters.get("data_source_id"),
+        )
+
+    elif action == "update_notion_page_content":
+        from app.providers.notion.api import update_notion_page_content  # noqa: PLC0415
+        return update_notion_page_content(
+            page_id=parameters["page_id"],
+            old_str=parameters.get("old_str"),
+            new_str=parameters.get("new_str", ""),
+        )
+
+    elif action == "update_notion_data_source":
+        from app.providers.notion.api import update_notion_data_source  # noqa: PLC0415
+        return update_notion_data_source(
+            data_source_id=parameters["data_source_id"],
+            title=parameters.get("title"),
+        )
+
+    elif action == "complete_notion_todo_item":
+        from app.providers.notion.api import complete_notion_todo_item  # noqa: PLC0415
+        return complete_notion_todo_item(
+            page_id=parameters["page_id"],
+            item_text=parameters["item_text"],
+            completed=parameters.get("completed", True),
+        )
+
     else:
         raise ValueError(f"Unknown action: {action}")
+
+
+
 
 
 @app.post("/agent/resume-plan", tags=["Agent"])
 async def resume_plan(body: ResumePlanRequest) -> StreamingResponse:
     """
-    Called when the user approves a paused workflow step in Flutter.
-    Runs the approved action, updates plan status, and streams the remaining execution logs.
+    Resumes an existing plan step after user approval or modification from the mobile app.
+    Streams execution logs and the final tool response via Server-Sent Events (SSE).
     """
-    user_id = settings.DEV_USER_ID
-    logger.info("Resuming plan %s, approved step %d", body.plan_id, body.step_id)
 
-    async def resume_stream():
+    async def event_generator():
         try:
-            # 1. Load active plan record
+            # 1. Fetch active plan record
+            user_id = settings.DEV_USER_ID
             record = load_active_plan_record(body.plan_id)
+
             if not record:
-                yield f"data: {json.dumps({'type': 'error', 'message': 'Active plan not found.'})}\n\n"
+                yield f"data: {json.dumps({'type': 'error', 'message': f'Plan {body.plan_id} not found.'})}\n\n"
                 return
 
             plan_json = record.get("plan_json")
@@ -858,11 +1028,23 @@ async def resume_plan(body: ResumePlanRequest) -> StreamingResponse:
                     step.parameters["date"] = body.edited_data.get("date", step.parameters.get("date"))
                     step.parameters["time"] = body.edited_data.get("time", step.parameters.get("time"))
                     step.parameters["duration_minutes"] = int(body.edited_data.get("duration_minutes", step.parameters.get("duration_minutes") or 60))
-                    step.parameters["attendees"] = body.edited_data.get("attendees", step.parameters.get("attendees"))
+                    attendees_val = body.edited_data.get("attendees", step.parameters.get("attendees"))
+                    if isinstance(attendees_val, str):
+                        attendees_val = [a.strip() for a in attendees_val.split(",") if a.strip()]
+                    step.parameters["attendees"] = attendees_val
+                elif step.action in ("create_notion_database_entry", "update_notion_database_entry"):
+                    from app.providers.notion.api import parse_properties_to_dict  # noqa: PLC0415
+                    for k, v in body.edited_data.items():
+                        if k not in ["plan_id", "step_id", "safety_warning", "requires_double_confirm", "safety_level"]:
+                            if k == "properties":
+                                step.parameters["properties"] = parse_properties_to_dict(v)
+                            else:
+                                step.parameters[k] = v
                 else:
                     for k, v in body.edited_data.items():
                         if k not in ["plan_id", "step_id", "safety_warning", "requires_double_confirm", "safety_level"]:
                             step.parameters[k] = v
+
 
             # 4. Execute the approved step
             yield f"data: {json.dumps({'type': 'log', 'message': f'⚡ Executing approved action: {step.description}'}, ensure_ascii=False)}\n\n"
@@ -894,7 +1076,7 @@ async def resume_plan(body: ResumePlanRequest) -> StreamingResponse:
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
     return StreamingResponse(
-        resume_stream(),
+        event_generator(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

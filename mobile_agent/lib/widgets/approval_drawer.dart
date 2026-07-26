@@ -261,7 +261,86 @@ const List<ActionSchema> _kActionSchemas = [
       ),
     ],
   ),
+
+  // ── Notion Schemas ────────────────────────────────────────────────────────
+  ActionSchema(
+    actionType: 'create_notion_page',
+    displayName: 'New Notion Page',
+    confirmLabel: 'Approve & Create Page',
+    headerIcon: Icons.note_add_rounded,
+    accentColor: Color(0xFFFFB703),
+    fields: [
+      ActionField(
+        key: 'parent_page_id',
+        label: 'Parent Page ID',
+        icon: Icons.folder_rounded,
+        type: FieldType.readOnly,
+      ),
+      ActionField(
+        key: 'title',
+        label: 'Page Title',
+        icon: Icons.title_rounded,
+      ),
+      ActionField(
+        key: 'content',
+        label: 'Page Content',
+        icon: Icons.article_rounded,
+        type: FieldType.multiLine,
+      ),
+    ],
+  ),
+
+  ActionSchema(
+    actionType: 'create_notion_database_entry',
+    displayName: 'New Notion DB Entry',
+    confirmLabel: 'Approve & Add Entry',
+    headerIcon: Icons.table_rows_rounded,
+    accentColor: Color(0xFFFFB703),
+    fields: [
+      ActionField(
+        key: 'database_id',
+        label: 'Target Database ID',
+        icon: Icons.table_chart_rounded,
+        type: FieldType.readOnly,
+      ),
+      ActionField(
+        key: 'properties',
+        label: 'Properties',
+        icon: Icons.list_alt_rounded,
+        type: FieldType.multiLine,
+      ),
+      ActionField(
+        key: 'content',
+        label: 'Page Content (Optional)',
+        icon: Icons.article_rounded,
+        type: FieldType.multiLine,
+      ),
+    ],
+  ),
+
+  ActionSchema(
+    actionType: 'append_notion_page',
+    displayName: 'Append to Notion Page',
+    confirmLabel: 'Approve & Append Content',
+    headerIcon: Icons.post_add_rounded,
+    accentColor: Color(0xFFFFB703),
+    fields: [
+      ActionField(
+        key: 'page_id',
+        label: 'Target Page ID',
+        icon: Icons.note_alt_rounded,
+        type: FieldType.readOnly,
+      ),
+      ActionField(
+        key: 'content',
+        label: 'Content to Append',
+        icon: Icons.article_rounded,
+        type: FieldType.multiLine,
+      ),
+    ],
+  ),
 ];
+
 
 ActionSchema _schemaFor(String actionType) {
   return _kActionSchemas.firstWhere(

@@ -27,6 +27,12 @@ from app.capabilities.documents.document_tools import (
     get_document_summary,
     list_my_documents,
 )
+from app.providers.notion.api import (
+    search_notion,
+    read_notion_page,
+    query_notion_database,
+    list_notion_databases,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +48,10 @@ _READ_DISPATCH: dict[str, callable] = {
     "search_my_documents": search_my_documents,
     "get_document_summary": get_document_summary,
     "list_my_documents": list_my_documents,
+    "search_notion": search_notion,
+    "read_notion_page": read_notion_page,
+    "query_notion_database": query_notion_database,
+    "list_notion_databases": list_notion_databases,
 }
 
 # Parameter key mapping: (tool, action) → how to map step.parameters to the
@@ -79,6 +89,53 @@ _PARAM_ALIASES: dict[str, dict[str, str]] = {
     "delete_watcher": {
         "watcher_id": "watcher_id",
         "description": "description",
+    },
+    "search_notion": {"query": "query"},
+    "read_notion_page": {"page_id": "page_id"},
+    "query_notion_database": {
+        "database_id": "database_id",
+        "filter_description": "filter_description",
+    },
+    "list_notion_databases": {},
+    "create_notion_page": {
+        "parent_page_id": "parent_page_id",
+        "title": "title",
+        "content": "content",
+    },
+    "create_notion_database_entry": {
+        "database_id": "database_id",
+        "properties": "properties",
+        "content": "content",
+    },
+    "append_notion_page": {
+        "page_id": "page_id",
+        "content": "content",
+    },
+    "update_notion_database_entry": {
+        "page_id": "page_id",
+        "entry_id": "page_id",
+        "row_id": "page_id",
+        "entry_title": "page_id",
+        "row_title": "page_id",
+        "title": "page_id",
+        "properties": "properties",
+        "data_source_id": "data_source_id",
+        "database_id": "data_source_id",
+    },
+
+    "update_notion_page_content": {
+        "page_id": "page_id",
+        "old_str": "old_str",
+        "new_str": "new_str",
+    },
+    "update_notion_data_source": {
+        "data_source_id": "data_source_id",
+        "title": "title",
+    },
+    "complete_notion_todo_item": {
+        "page_id": "page_id",
+        "item_text": "item_text",
+        "completed": "completed",
     },
 }
 
@@ -171,7 +228,38 @@ _WRITE_APPROVAL_MAP: dict[str, tuple[str, dict[str, str]]] = {
             "description": "description",
         },
     ),
+    "create_notion_page": (
+        "create_notion_page",
+        {"parent_page_id": "parent_page_id", "title": "title", "content": "content"},
+    ),
+    "create_notion_database_entry": (
+        "create_notion_database_entry",
+        {"database_id": "database_id", "properties": "properties", "content": "content"},
+    ),
+    "append_notion_page": (
+        "append_notion_page",
+        {"page_id": "page_id", "content": "content"},
+    ),
+    "update_notion_database_entry": (
+        "update_notion_database_entry",
+        {"page_id": "page_id", "properties": "properties", "data_source_id": "data_source_id"},
+    ),
+    "update_notion_page_content": (
+        "update_notion_page_content",
+        {"page_id": "page_id", "old_str": "old_str", "new_str": "new_str"},
+    ),
+    "update_notion_data_source": (
+        "update_notion_data_source",
+        {"data_source_id": "data_source_id", "title": "title"},
+    ),
+    "complete_notion_todo_item": (
+        "complete_notion_todo_item",
+        {"page_id": "page_id", "item_text": "item_text", "completed": "completed"},
+    ),
 }
+
+
+
 
 
 # ── Plan Persistence Helpers ──────────────────────────────────────────────────
@@ -509,10 +597,115 @@ async def execute_plan(
                 data["attachments"] = resolved_attachments
                 step.parameters["attachments"] = resolved_attachments
 
+            # Resolve human titles / Notion IDs before emitting approval payload
+            if step.action in ("update_notion_database_entry", "update_notion_page_content", "update_notion_data_source", "complete_notion_todo_item"):
+                from app.providers.notion.api import resolve_notion_id, resolve_datasource_id, resolve_database_row_id  # noqa: PLC0415
+                logger.info(
+                    "[PRE-STAGING DEBUGS] Staging step %d (%s) — initial parameters: %s, data: %s",
+                    step.step_id, step.action, step.parameters, data
+                )
+
+
+                if step.action == "update_notion_database_entry":
+                    raw_page = str(
+                        step.parameters.get("page_id")
+                        or step.parameters.get("entry_id")
+                        or step.parameters.get("row_id")
+                        or step.parameters.get("title")
+                        or step.parameters.get("entry_title")
+                        or data.get("page_id")
+                        or ""
+                    ).strip()
+
+                    raw_ds = str(
+                        step.parameters.get("data_source_id")
+                        or step.parameters.get("database_id")
+                        or data.get("data_source_id")
+                        or ""
+                    ).strip()
+
+                    logger.info("[PRE-STAGING DEBUGS] Extracted raw values: raw_page='%s', raw_ds='%s'", raw_page, raw_ds)
+
+                    # If raw_page is empty, check if row title was passed inside properties dict!
+                    if not raw_page:
+                        props = step.parameters.get("properties", {})
+                        if isinstance(props, dict):
+                            for candidate_key in ("Name", "Title", "Decks", "Entry", "Page", "Topic", "Item"):
+                                if candidate_key in props and isinstance(props[candidate_key], str) and props[candidate_key].strip():
+                                    raw_page = props[candidate_key].strip()
+                                    logger.info("[PRE-STAGING DEBUGS] Extracted raw_page from properties['%s'] -> '%s'", candidate_key, raw_page)
+                                    break
+
+                    # 1. Resolve data_source_id
+                    resolved_ds = ""
+                    if raw_ds:
+                        resolved_ds = resolve_datasource_id(raw_ds)
+                        logger.info("[PRE-STAGING DEBUGS] Resolved raw_ds '%s' -> '%s'", raw_ds, resolved_ds)
+                    else:
+                        for s_step in plan.steps:
+                            if s_step.action == "query_notion_database":
+                                db_param = str(s_step.parameters.get("database_id", "")).strip()
+                                if db_param:
+                                    resolved_ds = resolve_datasource_id(db_param)
+                                    logger.info("[PRE-STAGING DEBUGS] Inferred raw_ds from Step %d query ('%s') -> '%s'", s_step.step_id, db_param, resolved_ds)
+                                    break
+
+                    if resolved_ds:
+                        step.parameters["data_source_id"] = resolved_ds
+                        data["data_source_id"] = resolved_ds
+
+                    # 2. Resolve page_id (database row UUID)
+                    resolved_page = ""
+                    if raw_page:
+                        if resolved_ds:
+                            row_id = resolve_database_row_id(resolved_ds, raw_page)
+                            if row_id:
+                                resolved_page = row_id
+                                logger.info("[PRE-STAGING DEBUGS] Resolved row_id via database query: '%s' -> '%s'", raw_page, resolved_page)
+                        if not resolved_page:
+                            resolved_page = resolve_notion_id(raw_page, "page")
+                            logger.info("[PRE-STAGING DEBUGS] Resolved raw_page via workspace search: '%s' -> '%s'", raw_page, resolved_page)
+                    else:
+                        logger.warning("[PRE-STAGING DEBUGS] raw_page is still empty after property checks!")
+
+
+                    if resolved_page:
+                        step.parameters["page_id"] = resolved_page
+                        data["page_id"] = resolved_page
+
+                    logger.info(
+                        "[PRE-STAGING DEBUGS] FINAL STAGED DATA for update_notion_database_entry: page_id='%s', data_source_id='%s', properties=%s",
+                        data.get("page_id"), data.get("data_source_id"), data.get("properties")
+                    )
+
+                elif step.action == "update_notion_page_content":
+                    raw_page = str(step.parameters.get("page_id") or data.get("page_id") or "").strip()
+                    if raw_page:
+                        resolved_page = resolve_notion_id(raw_page, "page")
+                        step.parameters["page_id"] = resolved_page
+                        data["page_id"] = resolved_page
+
+                elif step.action == "update_notion_data_source":
+                    raw_ds = str(step.parameters.get("data_source_id") or data.get("data_source_id") or "").strip()
+                    if raw_ds:
+                        resolved_ds = resolve_datasource_id(raw_ds)
+                        step.parameters["data_source_id"] = resolved_ds
+                        data["data_source_id"] = resolved_ds
+
+                elif step.action == "complete_notion_todo_item":
+                    raw_page = str(step.parameters.get("page_id") or data.get("page_id") or "").strip()
+                    if raw_page:
+                        resolved_page = resolve_notion_id(raw_page, "page")
+                        step.parameters["page_id"] = resolved_page
+                        data["page_id"] = resolved_page
+
+
+
             if safety_rating:
                 data["safety_warning"] = safety_rating.scope_warning
                 data["requires_double_confirm"] = safety_rating.requires_double_confirm
                 data["safety_level"] = safety_rating.level
+
 
             yield {
                 "type": "log",
@@ -535,7 +728,18 @@ async def execute_plan(
         completed_steps = [s for s in plan.steps if s.status == "completed"]
         if len(completed_steps) == len(plan.steps):
             save_active_plan(plan)
-            final_text = "\n\n".join(accumulated_results) if accumulated_results else "Done."
+            if accumulated_results:
+                has_raw_context = any(
+                    "Retrieved Document Context" in r or "Document:" in r or "chunk_index" in r
+                    for r in accumulated_results
+                )
+                if has_raw_context and user_text:
+                    final_text = _synthesize_final_response(user_text, accumulated_results)
+                else:
+                    final_text = "\n\n".join(accumulated_results)
+            else:
+                final_text = "Done."
+
             yield {"type": "result", "text": final_text}
             for event in _emit_history_update(user_text, final_text, history):
                 yield event
@@ -545,6 +749,43 @@ async def execute_plan(
         save_active_plan(plan)
         yield {"type": "error", "message": "Dependency graph execution stalled. Aborting."}
         return
+
+
+# ── Response Synthesis ────────────────────────────────────────────────────────
+
+
+def _synthesize_final_response(user_text: str, tool_outputs: list[str]) -> str:
+    """
+    Synthesize raw tool outputs (e.g. RAG document chunks, search results)
+    into a clean, direct, executive response that directly answers the user's question.
+    """
+    from google import genai  # noqa: PLC0415
+    from google.genai import types  # noqa: PLC0415
+
+    context_block = "\n\n".join(tool_outputs)
+    prompt = f"""You are A.L.T.A.I.R., an executive AI assistant.
+
+The user asked: "{user_text}"
+
+The system retrieved the following document context / tool results:
+{context_block}
+
+INSTRUCTIONS:
+- Directly answer the user's question based ON THE RETRIEVED CONTEXT above.
+- Do NOT output debug header blocks like "--- Retrieved Document Context ---" or similarity scores unless specifically asked.
+- Provide a clean, executive, professional answer in markdown format.
+"""
+    try:
+        client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        resp = client.models.generate_content(
+            model=settings.GEMINI_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.2),
+        )
+        return resp.text.strip() if resp.text else context_block
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Response synthesis failed (%s) — falling back to raw output", exc)
+        return context_block
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

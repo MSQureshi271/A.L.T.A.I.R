@@ -19,6 +19,7 @@ class Settings(BaseSettings):
 
     # ── Gemini AI ────────────────────────────────────────────────────────────
     GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-2.5-flash"
 
     # ── Server ───────────────────────────────────────────────────────────────
     HOST: str = "0.0.0.0"
@@ -41,9 +42,15 @@ class Settings(BaseSettings):
     # localhost:8000 inside the emulator maps to host machine port 8000.
     GOOGLE_REDIRECT_URI: str = "http://localhost:8000/auth/google/callback"
 
+    # ── Notion OAuth 2.0 ──────────────────────────────────────────────────────────
+    NOTION_CLIENT_ID: str = ""
+    NOTION_CLIENT_SECRET: str = ""
+    NOTION_REDIRECT_URI: str = "https://craftily-roast-angelfish.ngrok-free.dev/auth/notion/callback"
+
     # ── Webhook Push Settings (Phase 7) ──────────────────────────────────────
     WEBHOOK_BASE_URL: str = ""  # e.g. "https://xxxxxx.ngrok-free.app"
     GOOGLE_PUBSUB_TOPIC: str = ""  # e.g. "projects/my-project/topics/my-topic"
+
 
     # ── Supabase ─────────────────────────────────────────────────────────────
     # Get these from: Supabase Dashboard → Project Settings → API

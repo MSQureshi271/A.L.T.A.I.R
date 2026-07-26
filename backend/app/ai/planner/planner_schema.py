@@ -16,7 +16,7 @@ class TaskStep(BaseModel):
     step_id: int = Field(
         description="Unique sequential identifier for this step, starting at 1."
     )
-    tool: Literal["gmail", "calendar", "search", "documents", "memory", "watcher", "none"] = Field(
+    tool: Literal["gmail", "calendar", "search", "documents", "memory", "watcher", "notion", "none"] = Field(
         description="Which tool/service this step uses."
     )
     action: Literal[
@@ -43,7 +43,21 @@ class TaskStep(BaseModel):
         "delete_memory",
         "create_watcher",
         "delete_watcher",
+        "search_notion",
+        "read_notion_page",
+        "query_notion_database",
+        "list_notion_databases",
+        "create_notion_page",
+        "create_notion_database_entry",
+        "append_notion_page",
+        "update_notion_database_entry",
+        "update_notion_page_content",
+        "update_notion_data_source",
+        "complete_notion_todo_item",
     ] = Field(description="The specific action to perform within the tool.")
+
+
+
     parameters: dict = Field(
         default_factory=dict,
         description="Key-value arguments for the action.",

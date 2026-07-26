@@ -32,6 +32,15 @@ from app.capabilities.documents.document_tools import (
     list_my_documents,
     get_document_summary,
 )
+from app.providers.notion.api import (
+    search_notion,
+    read_notion_page,
+    query_notion_database,
+    list_notion_databases,
+    stage_notion_page,
+    stage_notion_database_entry,
+    stage_notion_append,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +55,14 @@ TOOLS: list[Any] = [
     search_my_documents,
     list_my_documents,
     get_document_summary,
+    # ── Notion ──────────────────────────────────────────────────────────────
+    search_notion,
+    read_notion_page,
+    query_notion_database,
+    list_notion_databases,
+    stage_notion_page,
+    stage_notion_database_entry,
+    stage_notion_append,
 ]
 
 # ── Local dispatch table  (function_name -> callable) ────────────────────────
@@ -57,9 +74,8 @@ business owner.  Your job is to understand voice commands and execute them
 using the tools available to you.
 
 Core rules:
-- NEVER send emails or create calendar events without calling the staging
-  tool first (stage_email / create_calendar_event).  The user MUST approve
-  before any action takes effect.
+- NEVER send emails, create calendar events, or write/append to Notion without calling
+  the staging tool first.  The user MUST approve before any action takes effect.
 - When a staging tool is called, stop generating further tool calls and
   return immediately so the user can review the draft.
 - Be concise and professional in your final text responses.
@@ -76,7 +92,21 @@ Document rules:
   explicitly and suggest they check the document name with list_my_documents.
 - Documents can be combined with other tools: e.g., retrieve content with
   search_my_documents, then use the result to populate an email via stage_email.
+
+Notion rules:
+- Use search_notion first when the user mentions any Notion content (a page, doc,
+  tracker, database, note, or wiki) without giving an explicit page ID.
+- Use read_notion_page to retrieve the full content of a page once you have its ID.
+- Use query_notion_database to list records from a structured database.
+- Use list_notion_databases when the user asks what databases they have.
+- NEVER create, append, or modify Notion content without staging it first:
+    • New page          → stage_notion_page
+    • New DB record     → stage_notion_database_entry
+    • Append to page    → stage_notion_append
+- When staging a Notion action, stop the tool loop immediately and return so the
+  user can review and approve the staged content.
 """.strip()
+
 
 
 def _build_client() -> genai.Client:
@@ -205,7 +235,7 @@ def _run_loop(
         }
 
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model=settings.GEMINI_MODEL,
             contents=contents,
             config=config,
         )
